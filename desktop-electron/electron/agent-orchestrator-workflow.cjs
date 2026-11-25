@@ -532,6 +532,8 @@ function createChatPreferences(file) {
   return {
     get: () => ({ autoRetry: saved.autoRetry === true, modelJudges: saved.modelJudges === true,
       meteredReviews: saved.meteredReviews === true,
+      // "Auto-review every approval request" (2026-11-24, on unless turned off): see reviewsForPerson.
+      autoReviewAll: saved.autoReviewAll !== false,
       autoCompact: saved.autoCompact !== false, autoCompactPercent: autoCompactPercent(saved.autoCompactPercent),
       questionTimeout: questionTimeoutSeconds(saved.questionTimeout) }),
     /** Takes effect at once; resolves when the change is on disk, so a restart right after keeps it. */
@@ -4878,8 +4880,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // "Approve for me": a request the reviewer is still checking, or has answered and is sending,
       // is not the person's to answer. The chat popped it up as a question anyway, and the person
       // waited on (or raced) the reviewer; it now shows as being reviewed instead.
-      return card?.mission && card?.node && !approvalNeedsPerson(card.mission, card.node, item)
-        ? { ...advised, awaiting_review: true } : advised;
+      if (card?.mission && card?.node && !approvalNeedsPerson(card.mission, card.node, item)) return { ...advised, awaiting_review: true };
+      // Waits only because "Auto-review every approval request" is off: the card offers that switch.
+      const reviewable = !["question", "plan"].includes(item?.kind) && (item?.kind === "command" || item?.source === "ao");
+      return reviewable && reviewedOnlyWithAutoReviewAll(card?.mission, card?.node) ? { ...advised, auto_review_off: true } : advised;
     })
     : approvals;
   // As much as the upstream request carries whole (agent-orchestrator-upstream: a command up to
@@ -5660,6 +5664,26 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (policy === undefined && reviewer === undefined) return node.route;
     return { ...node.route, ...(policy !== undefined ? { approval_policy: policy } : {}), ...(reviewer !== undefined ? { approvals_reviewer: reviewer } : {}) };
   }
+  /**
+   * Whether a card's requests go to the reviewer: "Approve for me" (auto_review), or any route that asks
+   * for approval while "Auto-review every approval request" is on. The user, 2026-11-24: "make all of the
+   * require approval into allow auto review"; a DeepSeek chat on Ask for approval showed a command with
+   * no reviewer, no Let the model judge and no quota switch, and waited. What the reviewer cannot decide
+   * still waits for the person, as in Approve for me.
+   */
+  function reviewsForPerson(route) {
+    if (!route || route.approval_policy === "never") return false;
+    return route.approvals_reviewer === "auto_review" || chatPreferences.get().autoReviewAll;
+  }
+  /**
+   * A card the reviewer would answer for the person if "Auto-review every approval request" were on: its
+   * requests wait on the person only because that switch is off, so their cards offer it.
+   */
+  function reviewedOnlyWithAutoReviewAll(mission, node) {
+    if (!mission || !node || chatPreferences.get().autoReviewAll || cardApprover(mission, node)) return false;
+    const route = liveRoute(mission, node);
+    return Boolean(route) && route.approval_policy !== "never" && !mission.nodes.some((item) => item.role === "approver") && externalAgent(node);
+  }
   /** The reviewer that answers a card's requests for the person, or null (see screenApprovals). */
   function cardApprover(mission, own, { useAutobot = true } = {}) {
     const teamApprover = mission.nodes.find((node) => node.role === "approver" && node.state === "finished" && node.receipt?.verdict === "APPROVED");
@@ -5670,7 +5694,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const config = autobot.get(mission.workspace_id, mission.project_id);
       if (config) return { route, autobot: config, settings: { instructions: "", auto_decide: true } };
     }
-    return teamApprover ?? (!teamHasApprover && route?.approvals_reviewer === "auto_review" && externalAgent(own)
+    return teamApprover ?? (!teamHasApprover && reviewsForPerson(route) && externalAgent(own)
       ? { route, settings: { instructions: "", auto_decide: true } } : null);
   }
   function reviewAttempt(mission, node) {
@@ -6082,7 +6106,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /** Whether this chat answers a card's requests for the person: by its permissions as they are now (liveRoute). */
   const answersForPerson = (node, mission) => {
     const route = mission ? liveRoute(mission, node) : node?.route;
-    return route?.approvals_reviewer === "auto_review" || route?.approval_policy === "never";
+    if (route?.approval_policy === "never" || route?.approvals_reviewer === "auto_review") return true;
+    // "Auto-review every approval request" answers for the person only where a reviewer takes the card's
+    // requests. A card with none (a native one, a team whose Command approver has not approved yet) would
+    // otherwise get its commands allowed by the AUTO_ANSWER_MS timer below with nothing reviewing them.
+    return Boolean(mission) && reviewsForPerson(route) && Boolean(cardApprover(mission, node));
   };
   /** The answer a question gets when nobody answers it: each field's recommended choice. */
   function recommendedAnswer(approval) {
@@ -6395,7 +6423,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * waiting me to judge, add a setting that allow the model to judge it … until end and it can
    * safety kill the goal". Off by default: on 2026-10-20 they wanted unjudged requests to wait.
    */
-  async function chatModelJudges({ enabled, meteredReviews } = {}) {
+  async function chatModelJudges({ enabled, meteredReviews, autoReviewAll } = {}) {
+    if (autoReviewAll !== undefined) {
+      if (typeof autoReviewAll !== "boolean") throw new Error("Choose on or off for auto-reviewing every approval request");
+      const changed = chatPreferences.get().autoReviewAll !== autoReviewAll;
+      await chatPreferences.set({ autoReviewAll });
+      if (changed) logger?.info?.("ao.auto_review_all_changed", { enabled: autoReviewAll });
+    }
     if (meteredReviews !== undefined) {
       if (typeof meteredReviews !== "boolean") throw new Error("Choose on or off for quota-based reviews");
       const changed = chatPreferences.get().meteredReviews !== meteredReviews;
@@ -6432,7 +6466,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       await saving;
     }
-    return { ok: true, modelJudges: chatPreferences.get().modelJudges, meteredReviews: chatPreferences.get().meteredReviews };
+    const preferences = chatPreferences.get();
+    return { ok: true, modelJudges: preferences.modelJudges, meteredReviews: preferences.meteredReviews, autoReviewAll: preferences.autoReviewAll };
   }
   /**
    * chat_question_timeout: reads "Agent questions", or sets it with `seconds`: how long a question

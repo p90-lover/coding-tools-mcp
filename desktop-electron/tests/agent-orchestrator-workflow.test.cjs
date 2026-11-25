@@ -3126,7 +3126,8 @@ test("activity reports each working card's runtime and current step without adva
   await new Promise(resolve => setImmediate(resolve));
   const result = await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
   assert.deepEqual(Object.keys(result.nodes).sort(), ["w1", "w2", "w3", "w4", "w5", "w6", "w7"], "only working cards");
-  assert.equal(result.nodes.w5.activity, "waiting for approval: npm run build");
+  // "Auto-review every approval request" is on by default: an Ask-for-approval card's request goes to the reviewer too.
+  assert.equal(result.nodes.w5.activity, "the reviewer is checking: npm run build");
   // Seen live: "waiting for approval" for the two minutes a review took, with nothing to answer.
   assert.equal(result.nodes.w6.activity, "the reviewer is checking: Get-CimInstance Win32_Process");
   assert.equal(result.nodes.w1.activity, "running a command");
@@ -3145,6 +3146,13 @@ test("activity reports each working card's runtime and current step without adva
   assert.equal(result.nodes.w7.activity, "waiting for the agent to take the message");
   assert.equal(result.nodes.w7.turn_started, false, "a queued turn has not started: it can read as stuck");
   assert.equal(result.nodes.w4.activity, "running python -m pytest tests -q (timeout 5m)");
+  // Turned off, only Approve for me cards are reviewed: the Ask card's request waits on the person.
+  await workflow.call("chat_model_judges", { autoReviewAll: false });
+  await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
+  await new Promise(resolve => setImmediate(resolve));
+  const off = await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
+  assert.equal(off.nodes.w5.activity, "waiting for approval: npm run build");
+  assert.equal(off.nodes.w6.activity, "the reviewer is checking: Get-CimInstance Win32_Process");
   assert.ok(calls.every((endpoint) => endpoint === "/api/v1/ao/read" || endpoint === "/api/v1/ao/harness/status"), "read-only calls only");
 });
 
@@ -3441,6 +3449,55 @@ test("a request the reviewer answers is marked as being reviewed, not shown to t
   // With no reviewer answering for the person, every request is theirs.
   saved = run("running");
   assert.equal((await status()).some((item) => item.awaiting_review), false);
+});
+
+test("an Ask-for-approval chat's request is reviewed while Auto-review every approval request is on, and offers that switch while it is off", async () => {
+  // The user, 2026-11-24: a DeepSeek chat on Ask for approval showed a command with no reviewer and no
+  // switches, and waited: "make all of the require approval into allow auto review".
+  const pending = [{ approval_id: "cmd", source: "ao", kind: "command", command: "npm run build", tool: "Bash" },
+    { approval_id: "ask", source: "ao", kind: "question", message: "Which branch?" }];
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/deepseek-v4-flash",
+    permission_profile: ":ao-default", approval_policy: "on-request", approvals_reviewer: "user" };
+  let saved = { id: "run", workspace_id: "ws", cancelled: false, nodes: [{ id: "worker", role: "worker", state: "running", route }] };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint) => {
+      if (endpoint.endsWith("/harness/status")) return { ok: true, status: { connected: true, pending_approvals: structuredClone(pending) } };
+      if (endpoint.endsWith("/ao/read")) return { ok: true, runs: [structuredClone(saved)] };
+      return { ok: true };
+    },
+  });
+  const status = async () => (await workflow.call("harness_status", { workspaceId: "ws", runId: "run", nodeId: "worker" })).status.pending_approvals;
+  const shown = (list, id) => list.find((item) => item.approval_id === id);
+  const on = await status();
+  assert.equal(shown(on, "cmd").awaiting_review, true, "on (the default): the reviewer has it");
+  assert.equal(shown(on, "cmd").auto_review_off, undefined);
+  assert.equal(typeof shown(on, "ask").auto_answer_at, "number", "its question answers itself after the wait (Settings > Chat > Agent questions)");
+  await workflow.call("chat_model_judges", { autoReviewAll: false });
+  const off = await status();
+  assert.equal(shown(off, "cmd").awaiting_review, undefined, "off: it is the person's");
+  assert.equal(shown(off, "cmd").auto_review_off, true, "and its card offers the switch that would review it");
+  assert.equal(shown(off, "ask").auto_review_off, undefined, "a question is not reviewed, so it does not offer the switch");
+  assert.equal(shown(off, "ask").auto_answer_at, undefined, "and it waits for the person's answer");
+  // Approve for me reviews it whatever the switch says; Full access never asks.
+  saved = { ...saved, nodes: [{ ...saved.nodes[0], route: { ...route, approvals_reviewer: "auto_review" } }] };
+  assert.equal(shown(await status(), "cmd").auto_review_off, undefined);
+  saved = { ...saved, nodes: [{ ...saved.nodes[0], route: { ...route, approval_policy: "never" } }] };
+  assert.equal(shown(await status(), "cmd").auto_review_off, undefined);
+  // A native card has no AO reviewer to send it to.
+  const native = { ...saved.nodes[0], route: { harness_id: "codex-native", model: "chatgpt-web/high", approval_policy: "on-request", approvals_reviewer: "user" } };
+  saved = { ...saved, nodes: [native] };
+  assert.equal(shown(await status(), "cmd").auto_review_off, undefined);
+  // On, a card nothing reviews is still not answered for the person: answering it would allow its
+  // commands on the AUTO_ANSWER_MS timer with no review (autoAnswerStale shares answersForPerson).
+  await workflow.call("chat_model_judges", { autoReviewAll: true });
+  const unreviewed = await status();
+  assert.equal(shown(unreviewed, "ask").auto_answer_at, undefined, "a native card's question waits for the person");
+  assert.equal(shown(unreviewed, "cmd").awaiting_review, undefined, "and its command is the person's");
+  // A team whose Command approver has not approved yet: its requests wait for it or the person.
+  saved = { ...saved, nodes: [{ ...saved.nodes[0], route }, { id: "approver", role: "approver", state: "running" }] };
+  const team = await status();
+  assert.equal(shown(team, "ask").auto_answer_at, undefined);
+  assert.equal(shown(team, "cmd").awaiting_review, undefined);
 });
 
 test("a request no review ever reached goes to the person after the review deadline", async () => {
@@ -7247,7 +7304,7 @@ test("Autobot config needs consent and answers an attested single-chat request o
 test("Approve for me picked while a turn runs reviews that turn's requests at once, not from its next turn", async () => {
   // Seen 2026-11-16: Auto Review answered 500 for a while; picked again once it was back, "Approve
   // for me" was saved for the next turn only, and a turn ten hours in kept waiting on the person.
-  const run = async (selection) => {
+  const run = async (selection, { autoReviewAll = false } = {}) => {
     const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
       permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
     const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
@@ -7277,6 +7334,7 @@ test("Approve for me picked while a turn runs reviews that turn's requests at on
       },
       confirm: async () => true,
     });
+    await workflow.call("chat_model_judges", { autoReviewAll });
     await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
     for (let tries = 0; tries < 150 && !resolved.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     mission.nodes[0].state = "finished";
@@ -7291,8 +7349,13 @@ test("Approve for me picked while a turn runs reviews that turn's requests at on
   assert.deepEqual(picked.resolved, [["session-1", "safe", "yes"]], "the running turn's request is answered by Approve for me");
   assert.ok(picked.advised.every(model => model === "codex-auto-review"));
   const unpicked = await run(null);
-  assert.deepEqual(unpicked.resolved, [], "launched to ask, with nothing picked since, the request stays the person's");
+  assert.deepEqual(unpicked.resolved, [], "auto-review-all off: launched to ask, with nothing picked since, the request stays the person's");
   assert.equal(unpicked.advised.length, 0, "and no reviewer is asked");
+  // The user, 2026-11-24: "make all of the require approval into allow auto review". On (the default),
+  // the same Ask-for-approval chat's request is answered by the reviewer.
+  const everyRequest = await run(null, { autoReviewAll: true });
+  assert.deepEqual(everyRequest.resolved, [["session-1", "safe", "yes"]], "auto-review-all on: the Ask chat's request is reviewed");
+  assert.ok(everyRequest.advised.every(model => model === "codex-auto-review"));
 });
 
 test("Approve for me is reviewed by codex-auto-review only, and the person decides when it cannot answer", async () => {
@@ -7914,8 +7977,8 @@ test("with \"Let the model judge\" on, a request too long to review whole is jud
     },
     confirm: async () => true,
   });
-  assert.deepEqual(await workflow.call("chat_model_judges", {}), { ok: true, modelJudges: false, meteredReviews: true }, "off unless the person turns it on");
-  assert.deepEqual(await workflow.call("chat_model_judges", { enabled: true }), { ok: true, modelJudges: true, meteredReviews: true });
+  assert.deepEqual(await workflow.call("chat_model_judges", {}), { ok: true, modelJudges: false, meteredReviews: true, autoReviewAll: true }, "off unless the person turns it on");
+  assert.deepEqual(await workflow.call("chat_model_judges", { enabled: true }), { ok: true, modelJudges: true, meteredReviews: true, autoReviewAll: true });
   await assert.rejects(workflow.call("chat_model_judges", { enabled: "yes" }), /on or off/);
   try {
     await workflow.call("start_run", { workspaceId: "ws", runId: "run" });

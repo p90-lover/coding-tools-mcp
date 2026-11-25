@@ -704,7 +704,8 @@ test("an AO agent's tool request is answered by clicking an option: no Submit or
 // on Ask for approval, which nothing reviews, and its card didn't say so. The card says why and switches it.
 test("a request in an Ask for approval chat offers Approve for me and says what the switch did", async () => {
   const view = renderer("AgentOrchestratorApproval.tsx");
-  const approval = { nodeId: "lead", approval_id: "ask", source: "ao", kind: "command", tool: "PowerShell",
+  // auto_review_off: Auto-review every approval request is off, so nothing reviews this chat's requests.
+  const approval = { nodeId: "lead", approval_id: "ask", source: "ao", kind: "command", tool: "PowerShell", auto_review_off: true,
     command: "Invoke-RestMethod -Uri 'http://127.0.0.1:7380/api/status'", decisions: [{ id: "yes", kind: "allow_once", label: "Yes" }, { id: "no", kind: "reject_once", label: "No" }] };
   let switches = 0;
   let outcome = async () => "Active now: the running turn's requests follow it.";
@@ -739,6 +740,8 @@ test("a request in an Ask for approval chat offers Approve for me and says what 
   // Without the switch (the chat isn't on Ask for approval), or with the reviewer's note (it was reviewed), no row.
   assert.equal(row({ onApproveForMe: undefined }), undefined);
   assert.equal(row({ approval: { ...approval, recommendation: { action: "ask", reason: "Check it yourself." } } }), undefined);
+  // With Auto-review every approval request on, the reviewer checks an Ask chat's requests: no row saying it doesn't.
+  assert.equal(row({ approval: { ...approval, auto_review_off: undefined } }), undefined);
 });
 
 test("only a chat on Ask for approval with an agent that asks the app is offered the switch, and only where the agent takes it", () => {

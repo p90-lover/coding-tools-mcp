@@ -897,14 +897,31 @@ test("a request waiting on quota-based reviews offers that switch on its card", 
   assert.doesNotMatch(card({ action: "ask", reason: "The reviewer left this to you." }), quota, "only where the request waits on it");
 });
 
+// The user, 2026-11-24: a DeepSeek chat on Ask for approval showed a command with no reviewer and no switches:
+// "make all of the require approval into allow auto review". With that switch off, its card offers it.
+test("a request waiting only because Auto-review every approval request is off offers that switch on its card", () => {
+  const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown, "./ModelJudgesToggle": judges });
+  const approval = { nodeId: "one", approval_id: "req", kind: "command", source: "ao", tool: "Bash", command: "npm run build" };
+  const card = (extra) => renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, { approval: { ...approval, ...extra }, busy: false, approve() {} }));
+  const all = /<span>Auto-review every approval request<\/span>/;
+  assert.match(card({ auto_review_off: true }), all);
+  assert.match(card({ auto_review_off: true }), /role="switch"/);
+  assert.doesNotMatch(card({}), all, "only where the request waits on it");
+});
+
 test("a request in an Ask for approval chat says on its card why it waits, with the switch to Approve for me", () => {
   const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown, "./ModelJudgesToggle": judges });
-  const approval = { nodeId: "one", approval_id: "req", kind: "command", source: "ao", tool: "PowerShell", command: "Invoke-RestMethod http://127.0.0.1:7380/api/status" };
-  const card = (props) => renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, { approval, busy: false, approve() {}, ...props }));
+  // auto_review_off: nothing reviews it (Auto-review every approval request is off), so it waits for the person.
+  const approval = { nodeId: "one", approval_id: "req", kind: "command", source: "ao", tool: "PowerShell", command: "Invoke-RestMethod http://127.0.0.1:7380/api/status", auto_review_off: true };
+  const card = (props, extra = {}) => renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, { approval: { ...approval, ...extra }, busy: false, approve() {}, ...props }));
   const asking = card({ onApproveForMe: async () => "" });
   assert.match(asking, /<div class="cdx-row cdx-ask-mode"><span>Mode<\/span><p>Ask for approval: the reviewer doesn&#x27;t check this chat&#x27;s requests, so each one waits for you\./);
   assert.match(asking, /<button type="button" class="cdx-inline-action">Approve for me<\/button>/);
+  assert.match(asking, /<span>Auto-review every approval request<\/span>/, "and the switch that reviews every chat's requests");
   assert.doesNotMatch(card({}), /cdx-ask-mode/, "a chat on Approve for me or Full access has no such row");
+  // With Auto-review every approval request on, the reviewer does check an Ask chat's requests: one past the
+  // review deadline with no answer must not claim it doesn't.
+  assert.doesNotMatch(card({ onApproveForMe: async () => "" }, { auto_review_off: undefined }), /cdx-ask-mode/);
 });
 
 test("AO and native approval commands share directly scrollable cards without extra viewer controls", () => {

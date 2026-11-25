@@ -391,7 +391,7 @@ test("quota-review consent is separate from model judge and persists across work
   fs.writeFileSync(file, JSON.stringify({ modelJudges: true }));
   const first = fixture(file);
   try {
-    assert.deepEqual(await first.workflow.call("chat_model_judges"), { ok: true, modelJudges: true, meteredReviews: false });
+    assert.deepEqual(await first.workflow.call("chat_model_judges"), { ok: true, modelJudges: true, meteredReviews: false, autoReviewAll: true });
     await first.workflow.call("chat_model_judges", { meteredReviews: true });
   } finally { first.workflow.dispose(); }
   const second = fixture(file);
@@ -400,6 +400,11 @@ test("quota-review consent is separate from model judge and persists across work
     await second.workflow.call("chat_model_judges", { meteredReviews: false });
     assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).meteredReviews, false);
     assert.equal((await second.workflow.call("chat_model_judges")).modelJudges, true);
+    // "Auto-review every approval request" (2026-11-24): on unless turned off, and kept when turned off.
+    assert.equal((await second.workflow.call("chat_model_judges")).autoReviewAll, true);
+    await second.workflow.call("chat_model_judges", { autoReviewAll: false });
+    assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).autoReviewAll, false);
+    await assert.rejects(second.workflow.call("chat_model_judges", { autoReviewAll: "yes" }), /Choose on or off/);
   } finally { second.workflow.dispose(); }
 });
 
