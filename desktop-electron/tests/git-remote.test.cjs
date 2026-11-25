@@ -251,3 +251,15 @@ test("a push to heads/<branch> names that branch, as git resolves it on the remo
   assert.deepEqual(gitPushRequest("git push origin feature:heads/develop").destinations, ["develop"]);
   assert.deepEqual(gitPushRequest("git push origin feature:refs/heads/heads/x").destinations, ["heads/x"]);
 });
+
+test("a repository with no commit yet is still a repository", async () => {
+  // `git rev-parse ... --abbrev-ref HEAD` exits 128 in a fresh `git init` (HEAD names an unborn
+  // branch) after printing the toplevel and git dirs: the folder is a repo with no branch to show.
+  const folder = os.tmpdir();
+  const unborn = (command, args, options, callback) => callback(Object.assign(new Error("exit 128"), { code: 128 }),
+    `${folder}\n${path.join(folder, ".git")}\n${path.join(folder, ".git")}\nHEAD\n`,
+    "fatal: ambiguous argument 'HEAD': unknown revision or path not in the working tree.\nUse '--' to separate paths from revisions\n");
+  const info = await readGitInfo(folder, { run: unborn });
+  assert.equal(info?.kind, "repo");
+  assert.equal(info.branch, null);
+});

@@ -108,8 +108,13 @@ async function readGitInfo(folder, options) {
   // repository read as "not git". Only git saying so means "none"; any other failure is unknown (null).
   const result = await gitResult(local, ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir", "--abbrev-ref", "HEAD"],
     { timeoutMs: GIT_INFO_TIMEOUT_MS, ...options });
-  if (!result.ok) return /not a git repository/i.test(result.stderr) ? { kind: "none", root: null, mainRepo: null, branch: null } : null;
-  const [root, gitDir, commonDir, head] = result.stdout.split(/\r?\n/).map((line) => line.trim());
+  // A fresh `git init` has no commit: HEAD is unborn, so the trailing --abbrev-ref HEAD fails
+  // (exit 128, "ambiguous argument 'HEAD'") after the folder facts were printed. It is a repository.
+  const unborn = !result.ok && /ambiguous argument 'HEAD'|unknown revision/i.test(result.stderr);
+  if (!result.ok && !unborn) return /not a git repository/i.test(result.stderr) ? { kind: "none", root: null, mainRepo: null, branch: null } : null;
+  const lines = result.stdout.split(/\r?\n/).map((line) => line.trim());
+  const [root, gitDir, commonDir] = lines;
+  const head = unborn ? null : lines[3];
   if (!root || !gitDir || !commonDir) return null;
   const branch = head && head !== "HEAD" && /^[\w./-]{1,200}$/.test(head) ? head : null;
   const toNative = (value) => path.resolve(value);
