@@ -146,3 +146,28 @@ test("the monitor checks after launch settles, then on a repeating timer until s
   monitor.stop();
   assert.equal(timers[1].cleared, true);
 });
+
+test("errors logged while an event read failed are still looked for at the next check", async () => {
+  // The lookback started from the previous check even when that check could not read the event log
+  // (wevtutil timed out on the busy disk): disk errors Windows logged in that window were never told.
+  let clock = 10_000_000;
+  const asked = [];
+  let fail = false;
+  const monitor = createDiskHealthMonitor({
+    paths: [],
+    platform: "win32",
+    statfs: async () => ({ bavail: 1, bsize: 1, blocks: 1 }),
+    readEvents: async ({ lookbackMs }) => { asked.push(lookbackMs); if (fail) throw new Error("wevtutil timed out"); return []; },
+    logger: { warn: () => {} },
+    now: () => clock,
+    checkMs: 30 * 60_000,
+  });
+  await monitor.check();
+  clock += 30 * 60_000;
+  fail = true;
+  await monitor.check();
+  clock += 30 * 60_000;
+  fail = false;
+  await monitor.check();
+  assert.deepEqual(asked, [30 * 60_000, 30 * 60_000, 60 * 60_000], "the third read covers the failed check's window too");
+});

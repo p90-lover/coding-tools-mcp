@@ -155,14 +155,16 @@ function createDiskHealthMonitor({ paths, logger, notify, platform = process.pla
     if (running) return running;
     running = (async () => {
       const at = now();
-      // Since the last check, so no event is missed between checks or counted twice.
+      // Since the last check that read the event log, so no event is missed between checks (a failed
+      // read leaves its window to the next one) or counted twice.
       const lookbackMs = lastCheckAt === null ? checkMs : Math.max(60_000, at - lastCheckAt);
-      lastCheckAt = at;
       const volumes = await readVolumes(paths, statfs);
       let events = [];
-      if (platform === "win32") {
+      if (platform !== "win32") lastCheckAt = at;
+      else {
         try {
           events = await readEvents({ lookbackMs });
+          lastCheckAt = at;
         } catch (error) {
           logger?.warn?.("launcher.disk_health_events_failed", { message: error instanceof Error ? error.message : String(error) });
         }
