@@ -1587,6 +1587,22 @@ test("open_plan updates one bound chat plan and only opens the pane on request",
   } finally { await tools.close(); }
 });
 
+test("a resumed session keeps the plan its chat shows", async () => {
+  const { tools } = fixture();
+  try {
+    const owner = await session(tools, { id: "plan-resume" });
+    const input = { goal: "Keep the plan", done_when: "The Plan pane still shows it after a resume", steps: [{ title: "Resume", status: "in_progress" }] };
+    assert.equal((await callTool(owner.url, owner.auth, "open_plan", input)).isError, false);
+    const plan = async () => (await tools.processes(["plan-resume"], "ws1"))[0]?.livePlan;
+    assert.equal((await plan())?.goal, input.goal);
+    // AO's daemon restarted: the chat is resumed with a fresh credential (renew), as bind() keeps it too.
+    const [{ url, headers }] = (await tools.renew("plan-resume")).servers;
+    assert.equal((await plan())?.goal, input.goal, "the plan survives the resume");
+    assert.equal((await post(url, { jsonrpc: "2.0", id: 1, method: "tools/list" }, { authorization: headers.Authorization })).status, 200);
+    assert.equal((await plan())?.goal, input.goal, "and the old credential's retirement");
+  } finally { await tools.close(); }
+});
+
 test("schedule_wakeup hands the chat's own session to the app's scheduler and tells the agent to end its turn", async () => {
   const asked = [];
   const wakeups = { schedule: async (request) => {

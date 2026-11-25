@@ -3457,6 +3457,8 @@ function createChatAgentTools({
         entry.commands = other.commands;
         entry.commandState = other.commandState;
         entry.root ??= other.root;
+        // The chat's Plan pane, as bind() keeps it: the new credential is the session's from now on.
+        if (other.workspaceId === entry.workspaceId && other.livePlan) entry.livePlan = other.livePlan;
         for (const origin of other.origins) entry.origins.add(origin);
         entry.supersedes.push(other.key);
       }
