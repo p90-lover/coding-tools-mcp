@@ -440,3 +440,12 @@ test("parseMessage keeps the whole body of a multipart part that has no headers"
   const parsed = await parseMessage(raw);
   assert.match(parsed.text, /^First paragraph\.\r\n\r\nSecond paragraph\./);
 });
+
+test("a character split across adjacent encoded words of one charset is decoded whole", async () => {
+  const { decodeHeaderWords } = require("../electron/email-mime.cjs");
+  // Some mailers cut a long subject into encoded words at a byte count, through a UTF-8 character.
+  assert.equal(decodeHeaderWords("=?UTF-8?B?5pel5g==?= =?UTF-8?B?nKzoqp4=?="), "日本語");
+  assert.equal(decodeHeaderWords("=?utf-8?Q?=E6=97=A5=E6?=\r\n =?utf-8?Q?=9C=AC=E8=AA=9E?= report"), "日本語 report");
+  // Different charsets stay separate words.
+  assert.equal(decodeHeaderWords("=?UTF-8?Q?caf=C3=A9?= =?ISO-8859-1?Q?caf=E9?="), "cafécafé");
+});

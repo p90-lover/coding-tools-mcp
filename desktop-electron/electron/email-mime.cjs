@@ -91,15 +91,24 @@ function decodeHeaderWords(value) {
 }
 
 function decodeEncodedWords(value) {
+  // Adjacent words of one charset are decoded as one byte run: some mailers cut a long subject at
+  // a byte count, through a multi-byte character, and each half alone decodes as U+FFFD.
   return value
     .replace(/(\?=)\s+(?==\?)/g, "$1") // whitespace between adjacent encoded words is not content
-    .replace(/=\?([^?*]+)(?:\*[^?]*)?\?([BbQq])\?([^?]*)\?=/g, (whole, charset, kind, data) => {
-      try {
-        const bytes = kind.toUpperCase() === "B"
-          ? Buffer.from(data, "base64")
-          : quotedPrintableBytes(data.replace(/_/g, " "));
-        return decodeCharset(bytes, charset);
-      } catch { return whole; }
+    .replace(/(?:=\?[^?*]+(?:\*[^?]*)?\?[BbQq]\?[^?]*\?=)+/g, (run) => {
+      let out = "", charset = null, bytes = [];
+      const flush = () => { if (charset !== null) out += decodeCharset(Buffer.concat(bytes), charset); charset = null; bytes = []; };
+      for (const [whole, wordCharset, kind, data] of run.matchAll(/=\?([^?*]+)(?:\*[^?]*)?\?([BbQq])\?([^?]*)\?=/g)) {
+        let decoded;
+        try {
+          decoded = kind.toUpperCase() === "B" ? Buffer.from(data, "base64") : quotedPrintableBytes(data.replace(/_/g, " "));
+        } catch { flush(); out += whole; continue; }
+        if (charset !== null && wordCharset.toLowerCase() !== charset.toLowerCase()) flush();
+        charset = wordCharset;
+        bytes.push(decoded);
+      }
+      flush();
+      return out;
     });
 }
 
