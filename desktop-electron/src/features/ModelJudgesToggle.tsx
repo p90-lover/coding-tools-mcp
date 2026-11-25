@@ -28,6 +28,33 @@ export function QuotaReviewsToggle() {
   </label>;
 }
 
+const AUTO_REVIEW_ALL_DETAIL = "Requests that need approval are reviewed for you in every chat, also on Ask for approval, as Approve for me does. What the reviewer cannot decide still waits for you. The same switch is in Settings > Chat";
+
+/**
+ * "Auto-review every approval request" (chat_model_judges autoReviewAll), on a request that waits on you
+ * only because it is off. The user, 2026-11-24: "make all of the require approval into allow auto review".
+ */
+export function AutoReviewAllToggle() {
+  const [on, setOn] = useState<boolean | null>(null);
+  const call = (args: { autoReviewAll: boolean } | Record<string, never>) => getCodingToolsClient().apps
+    .call({ moduleId: "agent-orchestrator", operation: "chat_model_judges", arguments: args })
+    .then((outer) => ((outer as { result?: { autoReviewAll?: boolean } }).result ?? outer as { autoReviewAll?: boolean }).autoReviewAll !== false);
+  useEffect(() => {
+    let live = true;
+    call({}).then((value) => { if (live) setOn(value); }, () => { if (live) setOn(false); });
+    return () => { live = false; };
+  }, []);
+  const flip = (next: boolean) => {
+    setOn(next);
+    call({ autoReviewAll: next }).then(setOn, () => setOn(!next));
+  };
+  return <label className="cx-auto-retry cx-model-judges cx-auto-review-all" title={AUTO_REVIEW_ALL_DETAIL}>
+    <input type="checkbox" role="switch" checked={on === true} disabled={on === null} onChange={(event) => flip(event.target.checked)} />
+    <span className="cx-switch" aria-hidden="true" />
+    <span>Auto-review every approval request</span>
+  </label>;
+}
+
 /**
  * "Let the model judge" (chat_model_judges): what would wait for you, a request the command reviewer
  * hands on or a goal round that ended needing you or failed, is judged by the model instead, and it

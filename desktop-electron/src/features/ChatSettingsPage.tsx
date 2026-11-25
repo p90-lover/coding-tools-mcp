@@ -155,7 +155,7 @@ function AllowedApps({ onError }: { onError: (message: string) => void }) {
 const COMPACT_CHOICES = [50, 60, 70, 80, 90, 95, 100];
 
 /** The chat's own preferences, kept by the bridge (agent-orchestrator-workflow.cjs), as Claude Code's settings. */
-type ChatPreferences = { autoCompact: boolean; percent: number; autoRetry: boolean; modelJudges: boolean; meteredReviews: boolean; questionTimeout: number };
+type ChatPreferences = { autoCompact: boolean; percent: number; autoRetry: boolean; modelJudges: boolean; meteredReviews: boolean; autoReviewAll: boolean; questionTimeout: number };
 // "Agent questions": how long a question waits before it is answered for you (chat_question_timeout).
 // 0 keeps it, and the agent paused on it, until you answer.
 const QUESTION_TIMEOUT_DEFAULT = 30;
@@ -278,7 +278,7 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
       .then(([compact, retry, judges, questions]) => {
         publishQuotaReviews(judges.meteredReviews === true);
         if (live) setChat({ autoCompact: compact.autoCompact !== false, percent: Number(compact.percent) || 95, autoRetry: retry.autoRetry === true, modelJudges: judges.modelJudges === true, meteredReviews: judges.meteredReviews === true,
-          questionTimeout: questionSeconds(questions.seconds) });
+          autoReviewAll: judges.autoReviewAll !== false, questionTimeout: questionSeconds(questions.seconds) });
       }, () => undefined);
     return () => { live = false; };
   }, []);
@@ -302,7 +302,7 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
       ...current,
       ...(operation === "chat_auto_compact" ? { autoCompact: result.autoCompact !== false, percent: Number(result.percent) || current.percent } : {}),
       ...(operation === "chat_auto_retry" ? { autoRetry: result.autoRetry === true } : {}),
-      ...(operation === "chat_model_judges" ? { modelJudges: result.modelJudges === true, meteredReviews: result.meteredReviews === true } : {}),
+      ...(operation === "chat_model_judges" ? { modelJudges: result.modelJudges === true, meteredReviews: result.meteredReviews === true, autoReviewAll: result.autoReviewAll !== false } : {}),
       ...(operation === "chat_question_timeout" ? { questionTimeout: questionSeconds(result.seconds) } : {}),
     })));
   };
@@ -431,6 +431,10 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
               <Row label="Retry automatically" description="A failed step retries by itself, up to 8 times over about half an hour. Sign-in errors still wait for you">
                 <Toggle label="Retry automatically" checked={chat?.autoRetry === true} disabled={!chat}
                   onChange={(next) => setChatPreference("chat_auto_retry", { enabled: next })} />
+              </Row>
+              <Row label="Auto-review every approval request" description="On by default. A request that needs approval is reviewed for you in every chat, also on Ask for approval, as Approve for me does. What the reviewer cannot decide still waits for you. Off: only Approve for me chats are reviewed.">
+                <Toggle label="Auto-review every approval request" checked={chat?.autoReviewAll !== false} disabled={!chat}
+                  onChange={(next) => setChatPreference("chat_model_judges", { autoReviewAll: next })} />
               </Row>
               <Row label="Allow quota-based reviews" description="Off by default. In Approve for me, eligible shell requests try native Codex Guardian first. With this and Let the model judge on, eligible fallback reviews can use account quota. Approve for me and Let the model judge do not turn CPA reviews on.">
                 <Toggle label="Allow quota-based reviews" checked={chat?.meteredReviews === true} disabled={!chat}

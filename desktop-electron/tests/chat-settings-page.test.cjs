@@ -85,6 +85,15 @@ test("Settings › Chat: CPA approval reviews require explicit consent separate 
   assert.match(read("electron/main.cjs"), /input\.arguments\?\.meteredReviews === undefined/);
 });
 
+test("Settings › Chat: Auto-review every approval request is on by default and saved through chat_model_judges", () => {
+  // The user, 2026-11-24: "make all of the require approval into allow auto review".
+  const page = read("src/features/ChatSettingsPage.tsx");
+  assert.match(page, /<Toggle label="Auto-review every approval request" checked=\{chat\?\.autoReviewAll !== false\}/);
+  assert.match(page, /setChatPreference\("chat_model_judges", \{ autoReviewAll: next \}\)/);
+  // Reading it is passive; turning it on or off needs the focused window, as the other switches.
+  assert.match(read("electron/main.cjs"), /input\.arguments\?\.autoReviewAll === undefined/);
+});
+
 test("Settings › Chat › Agent questions: wait for the answer (the agent pauses) or answer for me after N seconds, 30 by default", () => {
   const page = read("src/features/ChatSettingsPage.tsx");
   assert.match(page, /const QUESTION_TIMEOUT_DEFAULT = 30;/);

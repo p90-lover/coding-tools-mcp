@@ -896,6 +896,18 @@ test("a request waiting on quota-based reviews offers that switch on its card", 
   assert.doesNotMatch(card({ action: "ask", reason: "The reviewer left this to you." }), quota, "only where the request waits on it");
 });
 
+// The user, 2026-11-24: a DeepSeek chat on Ask for approval showed a command with no reviewer and no switches:
+// "make all of the require approval into allow auto review". With that switch off, its card offers it.
+test("a request waiting only because Auto-review every approval request is off offers that switch on its card", () => {
+  const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown, "./ModelJudgesToggle": judges });
+  const approval = { nodeId: "one", approval_id: "req", kind: "command", source: "ao", tool: "Bash", command: "npm run build" };
+  const card = (extra) => renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, { approval: { ...approval, ...extra }, busy: false, approve() {} }));
+  const all = /<span>Auto-review every approval request<\/span>/;
+  assert.match(card({ auto_review_off: true }), all);
+  assert.match(card({ auto_review_off: true }), /role="switch"/);
+  assert.doesNotMatch(card({}), all, "only where the request waits on it");
+});
+
 test("AO and native approval commands share directly scrollable cards without extra viewer controls", () => {
   const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown, "./ModelJudgesToggle": judges });
   const command = [...Array.from({ length: 30 }, (_, index) => `echo command-line-${index}`), "echo FULL_COMMAND_TAIL"].join("\n");

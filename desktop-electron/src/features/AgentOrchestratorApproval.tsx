@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { ModelJudgesToggle, QuotaReviewsToggle } from "./ModelJudgesToggle";
+import { AutoReviewAllToggle, ModelJudgesToggle, QuotaReviewsToggle } from "./ModelJudgesToggle";
 
 // The agent's questions and tool requests as the Codex desktop app asks them (its approval card and
 // request_user_input card, from the app's own markup and words, with "ChatGPT" read as the card's
@@ -79,6 +79,8 @@ export type AoApproval = {
   recommendation?: { action: "allow" | "deny" | "ask"; reason: string; quotaBlocked?: boolean; guardianWaitForJudge?: boolean };
   /** "Approve for me": the reviewer is checking it, or has answered and is sending its answer. */
   awaiting_review?: boolean;
+  /** It waits on the person only because "Auto-review every approval request" is off. */
+  auto_review_off?: boolean;
   /** An AO agent's parked tool request (e.g. Claude Code's Bash): its tool name and AO's summary. */
   source?: "ao"; tool?: string; summary?: string;
   /** The decisions the AO agent offered; `plan` is the plan of an ExitPlanMode request. */
@@ -276,6 +278,8 @@ function AoAsk({ approval, busy, approve, actor }: {
       {/* It waits on Allow quota-based reviews: the switch it needs is here too, not only in Settings. */}
       {approval.recommendation?.quotaBlocked || approval.recommendation?.guardianWaitForJudge
         ? <div className="cdx-row"><span /><QuotaReviewsToggle /></div> : null}
+      {/* Nobody reviews it only because Auto-review every approval request is off: turning it on here sends it to the reviewer. */}
+      {approval.auto_review_off ? <div className="cdx-row"><span /><AutoReviewAllToggle /></div> : null}
       {approval.dependencyNote ? <p className={`cdx-reason ao-dependency-note is-${approval.dependencyNote.tone}`}
         role={approval.dependencyNote.tone === "warn" ? "alert" : "note"}>{approval.dependencyNote.text}</p> : null}
       <CdxOptions name={title} options={options} picked={sent ? [sent] : []} onPick={send} disabled={busy || Boolean(sent)} />
