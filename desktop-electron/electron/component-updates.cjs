@@ -53,6 +53,9 @@ function createComponentUpdater({
   let working = false;
   let stopped = false;
   let swapping = null;
+  // Each start() begins a new chain of checks; a check that finishes after a stop or restart does
+  // not schedule the next one for the chain it belonged to.
+  let chain = 0;
 
   async function check() {
     if (stopped || working || !enabled()) return null;
@@ -128,9 +131,11 @@ function createComponentUpdater({
   function start() {
     void stop();
     stopped = false;
+    const current = ++chain;
     const schedule = (delay) => {
       checkTimer = setTimeout(async () => {
         await check();
+        if (stopped || chain !== current) return;
         schedule(checkIntervalMs);
       }, delay);
       checkTimer.unref?.();

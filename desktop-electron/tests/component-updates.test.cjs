@@ -637,3 +637,45 @@ test("main sends CPA, app plugin and Antigravity CLI GitHub fetches through the 
   assert.equal((await fetchRemoteOffMain("https://api.example.test/moved", { redirect: "manual" })).status, 301, "a caller asking for manual redirects must get the redirect back");
   assert.deepEqual(native, [["https://api.example.test/moved", "manual"]]);
 });
+
+test("stopping the updater while an update check is running stops its later checks", async () => {
+  // The check timer rescheduled itself once its check finished, whether or not the updater had been
+  // stopped (or restarted) meanwhile: a stopped updater kept checking every interval, and a restart
+  // during a check left two chains of checks running.
+  let release = null;
+  let calls = 0;
+  const updater = createComponentUpdater({
+    componentId: "cpa",
+    stage: async () => { calls += 1; if (calls === 1) await new Promise((resolve) => { release = resolve; }); return { staged: false }; },
+    swap: async () => ({}),
+    firstCheckDelayMs: 1,
+    checkIntervalMs: 5,
+    swapPollMs: 60_000,
+  });
+  updater.start();
+  while (!release) await new Promise((resolve) => setTimeout(resolve, 2));
+  await updater.stop();
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(calls, 1, "no check may run after stop()");
+
+  // A restart during a check leaves one chain of checks, not two.
+  calls = 0;
+  release = null;
+  const restarted = createComponentUpdater({
+    componentId: "cpa",
+    stage: async () => { calls += 1; if (calls === 1) await new Promise((resolve) => { release = resolve; }); return { staged: false }; },
+    swap: async () => ({}),
+    firstCheckDelayMs: 1,
+    checkIntervalMs: 40,
+    swapPollMs: 60_000,
+  });
+  restarted.start();
+  while (!release) await new Promise((resolve) => setTimeout(resolve, 2));
+  restarted.start();
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 70));
+  await restarted.stop();
+  // One chain: the restarted first check (1 ms) and at most one 40 ms interval check after it.
+  assert.ok(calls <= 3, `expected one chain of checks, saw ${calls} checks`);
+});
