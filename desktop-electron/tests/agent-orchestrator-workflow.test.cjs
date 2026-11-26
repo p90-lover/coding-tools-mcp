@@ -9691,6 +9691,62 @@ test("a team with a Command approver never falls back to card-level auto-review"
   assert.equal(asked, 0);
 });
 
+test("Approve for me in a team whose Command approver has not approved never allows a command on the 20 second timer", async () => {
+  // cardApprover gives such a card no reviewer while answersForPerson still answers for an Approve for me
+  // card, so a request past AUTO_ANSWER_MS was allowed with nothing having reviewed it.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const since = "2000-01-01T00:00:00Z";
+  const requests = [
+    { approval_id: "cmd", source: "ao", kind: "command", tool: "Bash", command: "git status", since,
+      decisions: [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }] },
+    // A plan keeps its own AUTO_ANSWER_MS wait: being accepted shows the stale-answer pass ran past it.
+    { approval_id: "plan", source: "ao", kind: "plan", tool: "ExitPlanMode", plan: "1. Fix it", since,
+      decisions: [{ id: "acceptEdits", kind: "allow_always" }, { id: "keep", kind: "reject_once" }] },
+  ];
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "team", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "approver", role: "approver", state: "running", parents: [], route },
+    { id: "w1", role: "worker", state: "running", parents: [], route, receipt: { thread_id: "worker-session" } }] };
+  const resolved = [];
+  let asked = 0, observed = 0;
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      asked++;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"fixture"}' } }] }) };
+    },
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 2 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async (id) => {
+        if (id !== "worker-session") return { status: "working", turnId: "t", turnState: "running", approvals: [] };
+        observed++;
+        return { status: "working", turnId: "t", turnState: "running",
+          approvals: requests.filter(request => !resolved.some(([, requestId]) => requestId === request.approval_id)) };
+      },
+      resolveApproval: async (session, id, decision) => { resolved.push([session, id, decision]); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 300 && (observed < 3 || !resolved.length); tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(observed >= 3, "the stale-answer pass ran repeatedly");
+    assert.deepEqual(resolved, [["worker-session", "plan", "acceptEdits"]],
+      "the plan keeps its wait; the command waits for the team's approver or the person");
+    assert.equal(asked, 0, "no card-level reviewer stands in for the team's approver");
+  } finally {
+    mission.nodes.forEach(node => { node.state = "finished"; });
+    for (let tries = 0; tries < 100; tries++) {
+      if ((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).status !== "running") break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    workflow.dispose();
+  }
+});
+
 test("steering a team chat reaches its orchestrator, not a worker", async () => {
   const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
   const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
