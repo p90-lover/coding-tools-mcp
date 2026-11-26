@@ -149,6 +149,21 @@ test("Chat mounts the AO chat surface and the original AO UI links back to it", 
   assert.match(appSource, /label="Chat" onClick=\{\(\) => navigateSurface\("agent-orchestrator"\)\}/);
 });
 
+// The user (2026-11-26): "merge my orchestrator in to new tab call chats on runtime", "chats is
+// orchestrator, chat is still for ao". The original AO UI is Runtime > Chats, right after Chat, named
+// Orchestrator inside, and no longer folded under More.
+test("the Orchestrator's own app is Runtime > Chats, beside Chat, not under More", () => {
+  const runtime = appSource.slice(appSource.indexOf("<SidebarGroup label={copy.runtime}>"), appSource.indexOf("<SidebarGroup label={copy.workspace}>"));
+  assert.match(runtime, /label="Chat" onClick=\{\(\) => navigateSurface\("agent-orchestrator"\)\} \/>[\s\S]*?<SidebarItem active=\{surface === "agent-orchestrator-original"\} icon="orchestrator" label="Chats" onClick=\{\(\) => navigateSurface\("agent-orchestrator-original"\)\} \/>\s*<SidebarItem active=\{surface === "agent-orchestrator-teams"\}/);
+  const moreStart = appSource.indexOf("const moreSurfaces = [");
+  assert.ok(moreStart > 0);
+  assert.doesNotMatch(appSource.slice(moreStart, appSource.indexOf("] as const;", moreStart)), /agent-orchestrator-original/);
+  const view = fs.readFileSync(path.join(launcherRoot, "src", "features", "AgentOrchestratorOriginalSurface.tsx"), "utf8");
+  assert.match(view, /<strong>Orchestrator<\/strong>/);
+  assert.match(view, /"Opening Orchestrator…"/);
+  assert.doesNotMatch(view, /Agent Orchestrator/);
+});
+
 test("Register keeps its Connections destination and native overlay visibility gate", () => {
   const connections = appSource.slice(appSource.indexOf("<SidebarGroup label={copy.connections}>"), appSource.indexOf('<section className={`sidebar-more'));
   assert.match(connections, /active=\{surface === "register"\}[\s\S]*?label=\{copy.register\}[\s\S]*?navigateSurface\("register"\)/);
@@ -509,10 +524,10 @@ test("In-Process Apps shows only CPA/AO and refuses a stale retired selection", 
 });
 
 test("AO is the sole Runtime orchestrator and lets workers pick an AO harness", () => {
-  // The Runtime entry is named Chat and sits first in the sidebar, then its saved teams, its subagents, chat agents'
-  // computer use and Native Codex.
+  // The Runtime entry is named Chat and sits first in the sidebar, then Chats (the Orchestrator's own app), its saved
+  // teams, its subagents, chat agents' computer use and Native Codex.
   assert.match(appSource, /<nav className="sidebar-nav"[^>]*>\s*<SidebarGroup label=\{copy\.runtime\}>\s*<SidebarItem active=\{surface === "agent-orchestrator"\}/);
-  assert.match(appSource, /label="Chat" onClick=\{\(\) => navigateSurface\("agent-orchestrator"\)\} \/>\s*<SidebarItem active=\{surface === "agent-orchestrator-teams"\}[^\n]*label="Orchestrator Team"[^\n]*\/>\s*<SidebarItem active=\{surface === "subagents"\}[^\n]*label="Subagents"[^\n]*\/>\s*<SidebarItem active=\{surface === "computer-use"\}[^\n]*label="Computer use"[^\n]*\/>\s*<SidebarItem active=\{surface === "native-codex"\}/);
+  assert.match(appSource, /label="Chat" onClick=\{\(\) => navigateSurface\("agent-orchestrator"\)\} \/>\s*<SidebarItem active=\{surface === "agent-orchestrator-original"\}[^\n]*label="Chats"[^\n]*\/>\s*<SidebarItem active=\{surface === "agent-orchestrator-teams"\}[^\n]*label="Orchestrator Team"[^\n]*\/>\s*<SidebarItem active=\{surface === "subagents"\}[^\n]*label="Subagents"[^\n]*\/>\s*<SidebarItem active=\{surface === "computer-use"\}[^\n]*label="Computer use"[^\n]*\/>\s*<SidebarItem active=\{surface === "native-codex"\}/);
   assert.doesNotMatch(appSource, /label=\{copy\.structuredOrchestrator\}|surface === "orchestrator"|surface === "paseo"|navigateSurface\("paseo"\)/);
   assert.match(appSource, /setError\(`\$\{next\} is retired and unavailable\.`\)/);
   assert.match(aoSource, /moduleCall\("harnesses"\)/);

@@ -40,7 +40,7 @@ function tabLabel(tab: string, copy: Copy): string {
   const labels: Record<string, string> = {
     "agent-orchestrator": "Chat",
     "agent-orchestrator-teams": "Orchestrator Team",
-    "agent-orchestrator-original": "Agent Orchestrator",
+    "agent-orchestrator-original": "Chats",
     subagents: "Subagents",
     "computer-use": "Computer use",
     "app-layout": "App layout",

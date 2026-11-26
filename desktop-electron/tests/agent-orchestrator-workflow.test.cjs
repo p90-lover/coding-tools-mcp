@@ -9691,6 +9691,62 @@ test("a team with a Command approver never falls back to card-level auto-review"
   assert.equal(asked, 0);
 });
 
+test("Approve for me in a team whose Command approver has not approved never allows a command on the 20 second timer", async () => {
+  // cardApprover gives such a card no reviewer while answersForPerson still answers for an Approve for me
+  // card, so a request past AUTO_ANSWER_MS was allowed with nothing having reviewed it.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const since = "2000-01-01T00:00:00Z";
+  const requests = [
+    { approval_id: "cmd", source: "ao", kind: "command", tool: "Bash", command: "git status", since,
+      decisions: [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }] },
+    // A plan keeps its own AUTO_ANSWER_MS wait: being accepted shows the stale-answer pass ran past it.
+    { approval_id: "plan", source: "ao", kind: "plan", tool: "ExitPlanMode", plan: "1. Fix it", since,
+      decisions: [{ id: "acceptEdits", kind: "allow_always" }, { id: "keep", kind: "reject_once" }] },
+  ];
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "team", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "approver", role: "approver", state: "running", parents: [], route },
+    { id: "w1", role: "worker", state: "running", parents: [], route, receipt: { thread_id: "worker-session" } }] };
+  const resolved = [];
+  let asked = 0, observed = 0;
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      asked++;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"fixture"}' } }] }) };
+    },
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 2 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async (id) => {
+        if (id !== "worker-session") return { status: "working", turnId: "t", turnState: "running", approvals: [] };
+        observed++;
+        return { status: "working", turnId: "t", turnState: "running",
+          approvals: requests.filter(request => !resolved.some(([, requestId]) => requestId === request.approval_id)) };
+      },
+      resolveApproval: async (session, id, decision) => { resolved.push([session, id, decision]); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 300 && (observed < 3 || !resolved.length); tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(observed >= 3, "the stale-answer pass ran repeatedly");
+    assert.deepEqual(resolved, [["worker-session", "plan", "acceptEdits"]],
+      "the plan keeps its wait; the command waits for the team's approver or the person");
+    assert.equal(asked, 0, "no card-level reviewer stands in for the team's approver");
+  } finally {
+    mission.nodes.forEach(node => { node.state = "finished"; });
+    for (let tries = 0; tries < 100; tries++) {
+      if ((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).status !== "running") break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    workflow.dispose();
+  }
+});
+
 test("steering a team chat reaches its orchestrator, not a worker", async () => {
   const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
   const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
@@ -10210,11 +10266,13 @@ test("a cold launch whose agent never takes its message is ended after four minu
 test("a cold launch whose agent is up but never gets its first message is ended 90 s after its controller came up", async () => {
   // 2026-11-12: 3 of 9 cold starts hung after AO's controller_start, in the prompt's delivery
   // (queue_drain, milliseconds when healthy), and waited out the whole 4-minute bound.
-  let controllerUp = false;
-  const world = coldLaunchWorld({ autoRetry: true, observeAs: (id, at) => world?.killed.includes(id)
-    ? { status: "idle", turnId: "turn-1", turnState: "failed", error: "The agent could not start: context canceled" }
-    : { status: "idle", turnId: "turn-1", turnState: "queued", provisioning: true, ...(controllerUp ? { controllerUp: true } : {}),
-      lastActivityAt: at, timeline: [], approvals: [] } });
+  let controllerUp = false, upObserved = 0;
+  const world = coldLaunchWorld({ autoRetry: true, observeAs: (id, at) => {
+    if (world?.killed.includes(id)) return { status: "idle", turnId: "turn-1", turnState: "failed", error: "The agent could not start: context canceled" };
+    if (controllerUp) upObserved += 1;
+    return { status: "idle", turnId: "turn-1", turnState: "queued", provisioning: true, ...(controllerUp ? { controllerUp: true } : {}),
+      lastActivityAt: at, timeline: [], approvals: [] };
+  } });
   const wait = async (done, tries = 300) => { for (let i = 0; i < tries && !done(); i++) await new Promise(resolve => setTimeout(resolve, 10)); };
   try {
     await world.workflow.call("chat_auto_retry", { enabled: true });
@@ -10224,7 +10282,12 @@ test("a cold launch whose agent is up but never gets its first message is ended 
     world.advance(50_000);
     await wait(() => false, 30);
     controllerUp = true;
-    await wait(() => false, 30); // seen up from here
+    // Seen up from here, at this clock: observeExternal records the controller-up time as soon as its
+    // observe returns, so after two looks with the controller up the first is recorded. A fixed 300 ms
+    // wait let a slow CI runner first see it after the next advance, which started the 90 s a minute
+    // late (it failed CI on 5 branches, 2026-11-22..26).
+    await wait(() => upObserved >= 2);
+    assert.ok(upObserved >= 2, "the launch watch saw the controller up before the clock moved on");
     world.advance(60_000);
     await wait(() => false, 30);
     assert.deepEqual(world.killed, [], "a minute after its controller came up it is not ended yet");

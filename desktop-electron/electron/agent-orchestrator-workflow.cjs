@@ -5697,6 +5697,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return teamApprover ?? (!teamHasApprover && reviewsForPerson(route) && externalAgent(own)
       ? { route, settings: { instructions: "", auto_decide: true } } : null);
   }
+  /** A team with a Command approver that has not approved (yet): nothing reviews its cards' requests (cardApprover). */
+  const awaitsTeamApprover = (mission) => Boolean(mission?.nodes?.some((node) => node.role === "approver"))
+    && !mission.nodes.some((node) => node.role === "approver" && node.state === "finished" && node.receipt?.verdict === "APPROVED");
   function reviewAttempt(mission, node) {
     const approver = cardApprover(mission, node);
     return JSON.stringify([activityAttempt(mission.workspace_id, mission.id, node), node.state, node.route, node.settings,
@@ -6081,7 +6084,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // allowed once (one the safety rules block is denied), a plan is accepted with edits allowed,
   // and a question gets its recommended answer (the option marked "Recommended", else the first)
   // after the person's own "Agent questions" wait (questionWaitMs; none when they chose to keep it).
-  // "Ask for approval" keeps waiting for the person.
+  // "Ask for approval" keeps waiting for the person, and so does a command or tool request in a team
+  // whose Command approver has not approved yet (awaitsTeamApprover).
   const AUTO_ANSWER_MS = 20_000;
   /** How long a question waits for the person before it is answered for them; null: until they answer. */
   const questionWaitMs = () => {
@@ -6176,8 +6180,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // until then): the wait only held the agent up. One the reviewer left at "ask" is never
         // answered here: it waits for the person, with no timer (approvalNeedsPerson). A team whose
         // Command approver has not approved yet has no reviewer here: its requests keep waiting
-        // for it or the person.
+        // for it or the person. answersForPerson still answers for its "Approve for me" cards, so
+        // without this check autoVerdict, finding no reviewer, allowed them after AUTO_ANSWER_MS.
         const personal = ["question", "plan"].includes(approval.kind);
+        if (!personal && awaitsTeamApprover(mission)) continue;
         const reviewedHere = !personal && Boolean(cardApprover(mission, node));
         if (reviewedHere && approverAdvice.get(id)?.action === "ask") continue;
         const wait = approval.kind === "question" ? questionWaitMs() : AUTO_ANSWER_MS;

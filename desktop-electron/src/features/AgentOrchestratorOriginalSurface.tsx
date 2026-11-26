@@ -8,7 +8,7 @@ import { NativeViewsCoveredContext, SurfaceHiddenContext, useSurfaceHidden } fro
 async function callUpstream(operation: string, args: JsonObject = {}) {
   const response = await getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation, arguments: args });
   const result = response.result as Record<string, unknown>;
-  if (!response.ok || result?.ok === false) throw new Error(String(result?.error || result?.reason || "Agent Orchestrator is unavailable"));
+  if (!response.ok || result?.ok === false) throw new Error(String(result?.error || result?.reason || "Orchestrator is unavailable"));
   return result;
 }
 
@@ -79,9 +79,9 @@ export function AgentOrchestratorOriginalSurface({ openMissions, projectBoard = 
 
   const reconnect = () => setGeneration((value) => value + 1);
   return (
-    <section className={`original-ui-surface ao-original${hostbar ? "" : " is-embedded"}`} aria-label={projectBoard ? "Agent Orchestrator project board" : "Original Agent Orchestrator"}>
+    <section className={`original-ui-surface ao-original${hostbar ? "" : " is-embedded"}`} aria-label={projectBoard ? "Orchestrator project board" : "Orchestrator"}>
       {hostbar ? <header className="original-ui-hostbar ao-hostbar">
-        <strong>Agent Orchestrator</strong>
+        <strong>Orchestrator</strong>
         <span className={`ao-status-dot status-${state}`} role="status" title={error || STATE_LABEL[state] || state}>{STATE_LABEL[state] || state}</span>
         <div className="original-ui-hostbar-actions">
           <button type="button" onClick={openMissions} title="Open the mission canvas">{projectBoard ? "Canvas" : "Missions"}</button>
@@ -93,7 +93,7 @@ export function AgentOrchestratorOriginalSurface({ openMissions, projectBoard = 
       </header> : null}
       <div ref={panel} className="ao-original-viewport">
         {state !== "ready" ? <div className="original-ui-frame-empty" role="status">
-          <strong>{state === "starting" ? "Opening Agent Orchestrator…" : STATE_LABEL[state] || state}</strong>
+          <strong>{state === "starting" ? "Opening Orchestrator…" : STATE_LABEL[state] || state}</strong>
           {error ? <p>{error}</p> : null}
           {state === "error" || state === "stopped" ? <button type="button" onClick={reconnect}>Try again</button> : null}
         </div> : null}
