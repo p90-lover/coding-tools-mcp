@@ -504,7 +504,6 @@ function LauncherShell({
   const moreSurfaces = [
     { surface: "activity", icon: "activity", label: copy.activity },
     { surface: "rtk", icon: "gauge", label: "RTK" },
-    { surface: "agent-orchestrator-original", icon: "orchestrator", label: "Agent Orchestrator" },
     { surface: "antigravity-cli", icon: "terminal", label: "Antigravity CLI" },
     { surface: "cpa", icon: "providers", label: "CPA" },
     { surface: "network", icon: "globe", label: copy.networkProxy },
@@ -895,6 +894,7 @@ function LauncherShell({
             <nav className="sidebar-nav" aria-label={copy.workspace}>
               <SidebarGroup label={copy.runtime}>
                 <SidebarItem active={surface === "agent-orchestrator"} icon="chat" label="Chat" onClick={() => navigateSurface("agent-orchestrator")} />
+                <SidebarItem active={surface === "agent-orchestrator-original"} icon="orchestrator" label="Chats" onClick={() => navigateSurface("agent-orchestrator-original")} />
                 <SidebarItem active={surface === "agent-orchestrator-teams"} icon="team" label="Orchestrator Team" onClick={() => navigateSurface("agent-orchestrator-teams")} />
                 <SidebarItem active={surface === "subagents"} icon="git" label="Subagents" onClick={() => navigateSurface("subagents")} />
                 <SidebarItem active={surface === "computer-use"} icon="cursor" label="Computer use" onClick={() => navigateSurface("computer-use")} />
