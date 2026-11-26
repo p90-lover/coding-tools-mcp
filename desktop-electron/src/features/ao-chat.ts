@@ -1823,6 +1823,20 @@ export function chatSlashMatches(draft: string, context: { chat: boolean; run: b
     && (!command.needsChat || context.chat) && (!command.needsRun || context.run) && (!command.needsOpen || context.open !== false));
 }
 
+/**
+ * Why a command can't run in this chat now, or "" when it can. The picker hides such a command, but
+ * typed in full it ran and did nothing: /stop with nothing running, /retry or /fork before a turn,
+ * the box cleared and no word why.
+ */
+export function chatSlashUnavailable(name: string, context: { chat: boolean; run: boolean; open?: boolean }): string {
+  const command = CHAT_SLASH_COMMANDS.find((entry) => entry.name === name);
+  if (!command) return "";
+  if (command.needsChat && !context.chat) return `Open a chat first: /${name} works on the chat that's open.`;
+  if (command.needsRun && !context.run) return `This chat has no turn yet, so there's nothing for /${name} to act on.`;
+  if (command.needsOpen && context.open === false) return "Nothing is running in this chat.";
+  return "";
+}
+
 /** A command being typed with its argument ("/goal fix the flaky tests"), to show its usage. */
 export function chatSlashTyping(draft: string): ChatSlashCommand | null {
   const match = /^\/([a-z]+)\s/i.exec(draft);
