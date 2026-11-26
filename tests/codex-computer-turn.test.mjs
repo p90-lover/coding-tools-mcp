@@ -20,7 +20,10 @@ async function runtime(t) {
   fs.writeFileSync(path.join(base, 'helper_transport.js'), `
     export let current;
     export class WindowsHelperTransport {
-      constructor() { current = this; this.calls = []; this.held = false; }
+      constructor() {
+        current = this; this.calls = []; this.held = false;
+        this.tree = '3 button Save'; this.indexReady = false;
+      }
       onExit(fn) { this.exit = fn; }
       async close() { this.closed = true; this.held = false; }
       async request(method, params, options) {
@@ -28,13 +31,18 @@ async function runtime(t) {
         if (method === 'end_turn') {
           if (this.cleanupError) throw this.cleanupError;
           this.held = false;
+          this.indexReady = false;
           return null;
         }
         this.held = true;
         if (this.defer) await this.defer;
-        if (this.error) throw this.error;
+        if (this.error && (!this.errorMethod || this.errorMethod === method)) throw this.error;
         if (method === 'get_window') return ${JSON.stringify(window)};
-        if (method === 'get_window_state') return { window: ${JSON.stringify(window)}, screenshots: [] };
+        if (method === 'get_window_state') {
+          this.indexReady = true;
+          return { window: ${JSON.stringify(window)}, screenshots: [], accessibility: { tree: this.tree } };
+        }
+        if (method === 'click_element' && !this.indexReady) throw new Error('Call get_window_state before using an element index');
         return null;
       }
     }
@@ -89,6 +97,40 @@ test('each completed native operation releases its turn before returning without
   assert.equal(transport.closed, undefined, 'the approved client stays reusable');
 });
 
+test('an indexed click refreshes the approved control tree within one native turn', async t => {
+  const { bridge, transport } = await runtime(t);
+  await bridge.call('get_window_state', calls.get_window_state);
+  assert.equal(transport.indexReady, false, 'the idle helper must not retain interaction ownership');
+  transport.calls.length = 0;
+  await bridge.call('click', calls.click);
+  assert.deepEqual(transport.calls.map(c => c.method), ['get_window_state', 'click_element', 'end_turn']);
+  assert.deepEqual(transport.calls[0].params, { ...calls.get_window_state, window });
+  assert.deepEqual(transport.calls[1].params, { ...calls.click, window });
+  assert.equal(transport.held, false);
+  await assert.rejects(bridge.call('click', calls.click), /CODEX_ELEMENT_INVALID/);
+  assert.equal(transport.calls.filter(c => c.method === 'click_element').length, 1);
+});
+
+test('a changed control tree rejects an indexed click before input', async t => {
+  const { bridge, transport } = await runtime(t);
+  await bridge.call('get_window_state', calls.get_window_state);
+  transport.calls.length = 0;
+  transport.tree = '3 button Delete';
+  await assert.rejects(bridge.call('click', calls.click), /CODEX_ELEMENT_INVALID/);
+  assert.deepEqual(transport.calls.map(c => c.method), ['get_window_state', 'end_turn']);
+  assert.equal(transport.held, false);
+});
+
+test('an expired indexed view never dispatches input', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: 0 });
+  const { bridge, transport } = await runtime(t);
+  await bridge.call('get_window_state', calls.get_window_state);
+  transport.calls.length = 0;
+  t.mock.timers.tick(25_000);
+  await assert.rejects(bridge.call('click', calls.click), /CODEX_ELEMENT_INVALID/);
+  assert.deepEqual(transport.calls, []);
+});
+
 test('a recoverable native failure also releases interaction state and preserves the original failure', async t => {
   const { bridge, transport } = await runtime(t);
   await bridge.call('get_window', { id: 17 });
@@ -110,39 +152,40 @@ test('a policy stop, physical Escape or dead helper never triggers another nativ
     'computer-use helper exited with exit code 1',
   ]) {
     const { bridge, transport } = await runtime(t);
-    await bridge.call('get_window', { id: 17 });
+    await bridge.call('get_window_state', calls.get_window_state);
     transport.calls.length = 0;
+    transport.errorMethod = 'click_element';
     transport.error = new Error(message);
-    await assert.rejects(bridge.call('click', { element_index: 3 }), error => failureReply(error).fatal);
-    assert.deepEqual(transport.calls.map(c => c.method), ['click_element']);
+    await assert.rejects(bridge.call('click', calls.click), error => failureReply(error).fatal);
+    assert.deepEqual(transport.calls.map(c => c.method), ['get_window_state', 'click_element']);
   }
 });
 
 test('failed turn cleanup closes the bridge and makes the input outcome non-replayable', async t => {
   const { bridge, transport } = await runtime(t);
-  await bridge.call('get_window', { id: 17 });
+  await bridge.call('get_window_state', calls.get_window_state);
   transport.calls.length = 0;
   transport.cleanupError = new Error('cleanup failed');
-  await assert.rejects(bridge.call('click', { element_index: 3 }), error => {
+  await assert.rejects(bridge.call('click', calls.click), error => {
     assert.deepEqual(failureReply(error), { ok: false, code: 'CODEX_ENGINE_CLOSED', fatal: true });
     return true;
   });
   assert.equal(bridge.closed, true);
   assert.equal(transport.closed, true);
-  await assert.rejects(bridge.call('click', { element_index: 3 }), /CODEX_ENGINE_CLOSED/);
-  assert.deepEqual(transport.calls.map(c => c.method), ['click_element', 'end_turn']);
+  await assert.rejects(bridge.call('click', calls.click), /CODEX_ENGINE_CLOSED/);
+  assert.deepEqual(transport.calls.map(c => c.method), ['get_window_state', 'click_element', 'end_turn']);
 });
 
-test('closing a pending operation prevents cleanup from restarting its transport', async t => {
+test('closing during pre-click observation prevents input and never restarts the transport', async t => {
   const { bridge, transport } = await runtime(t);
-  await bridge.call('get_window', { id: 17 });
+  await bridge.call('get_window_state', calls.get_window_state);
   transport.calls.length = 0;
   let release;
   transport.defer = new Promise(resolve => { release = resolve; });
-  const pending = bridge.call('click', { element_index: 3 });
+  const pending = bridge.call('click', calls.click);
   await new Promise(resolve => setImmediate(resolve));
   await bridge.close();
   release();
   await assert.rejects(pending, /CODEX_ENGINE_CLOSED/);
-  assert.deepEqual(transport.calls.map(c => c.method), ['click_element']);
+  assert.deepEqual(transport.calls.map(c => c.method), ['get_window_state']);
 });
