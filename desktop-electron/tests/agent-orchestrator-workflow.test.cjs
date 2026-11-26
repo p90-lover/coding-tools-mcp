@@ -10266,11 +10266,13 @@ test("a cold launch whose agent never takes its message is ended after four minu
 test("a cold launch whose agent is up but never gets its first message is ended 90 s after its controller came up", async () => {
   // 2026-11-12: 3 of 9 cold starts hung after AO's controller_start, in the prompt's delivery
   // (queue_drain, milliseconds when healthy), and waited out the whole 4-minute bound.
-  let controllerUp = false;
-  const world = coldLaunchWorld({ autoRetry: true, observeAs: (id, at) => world?.killed.includes(id)
-    ? { status: "idle", turnId: "turn-1", turnState: "failed", error: "The agent could not start: context canceled" }
-    : { status: "idle", turnId: "turn-1", turnState: "queued", provisioning: true, ...(controllerUp ? { controllerUp: true } : {}),
-      lastActivityAt: at, timeline: [], approvals: [] } });
+  let controllerUp = false, upObserved = 0;
+  const world = coldLaunchWorld({ autoRetry: true, observeAs: (id, at) => {
+    if (world?.killed.includes(id)) return { status: "idle", turnId: "turn-1", turnState: "failed", error: "The agent could not start: context canceled" };
+    if (controllerUp) upObserved += 1;
+    return { status: "idle", turnId: "turn-1", turnState: "queued", provisioning: true, ...(controllerUp ? { controllerUp: true } : {}),
+      lastActivityAt: at, timeline: [], approvals: [] };
+  } });
   const wait = async (done, tries = 300) => { for (let i = 0; i < tries && !done(); i++) await new Promise(resolve => setTimeout(resolve, 10)); };
   try {
     await world.workflow.call("chat_auto_retry", { enabled: true });
@@ -10280,7 +10282,12 @@ test("a cold launch whose agent is up but never gets its first message is ended 
     world.advance(50_000);
     await wait(() => false, 30);
     controllerUp = true;
-    await wait(() => false, 30); // seen up from here
+    // Seen up from here, at this clock: observeExternal records the controller-up time as soon as its
+    // observe returns, so after two looks with the controller up the first is recorded. A fixed 300 ms
+    // wait let a slow CI runner first see it after the next advance, which started the 90 s a minute
+    // late (it failed CI on 5 branches, 2026-11-22..26).
+    await wait(() => upObserved >= 2);
+    assert.ok(upObserved >= 2, "the launch watch saw the controller up before the clock moved on");
     world.advance(60_000);
     await wait(() => false, 30);
     assert.deepEqual(world.killed, [], "a minute after its controller came up it is not ended yet");
