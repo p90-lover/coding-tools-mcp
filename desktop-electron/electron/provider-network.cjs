@@ -1613,7 +1613,7 @@ function createProviderNetworkController({
   // no route of its own follows All model providers). Route changes after that need no new stamp:
   // the router resolves the token live. A 401 stops it for half an hour: CPA locks its management API
   // after repeated ones.
-  const stampedProxyUrls = new Map(); // credential name -> the proxy_url this app run gave it
+  const credentialRouteResults = new Map(); // auth file name -> confirmed URL, or null for a virtual auth
   let credentialSync = null;
   let credentialSyncBlockedAt = 0;
   let credentialSyncAt = 0;
@@ -1638,7 +1638,10 @@ function createProviderNetworkController({
       let value = {};
       try { value = await response.json(); } catch { value = {}; }
       if (response.status === 401 || response.status === 403) throw Object.assign(new Error("CPA refused the management key"), { code: "UNAUTHORIZED" });
-      if (!response.ok) throw Object.assign(new Error(`CPA answered HTTP ${response.status}${typeof value?.error === "string" ? `: ${value.error.slice(0, 160)}` : ""}`), { status: response.status });
+      if (!response.ok) {
+        const virtualAuth = response.status === 409 && value?.error === "plugin virtual auth cannot be modified directly; edit or delete the source auth file";
+        throw Object.assign(new Error(`CPA answered HTTP ${response.status}`), { status: response.status, virtualAuth });
+      }
       return value;
     } finally {
       clearTimeout(timeout);
@@ -1651,12 +1654,17 @@ function createProviderNetworkController({
     if (credentialSyncBlockedAt && Date.now() - credentialSyncBlockedAt < CREDENTIAL_SYNC_BLOCK_MS) return Promise.resolve(null);
     credentialSync = (async () => {
       const listing = await cpaManagement("/v0/management/auth-files");
-      const files = Array.isArray(listing?.files) ? listing.files : Array.isArray(listing) ? listing : [];
+      const files = Array.isArray(listing?.files) ? listing.files : listing;
+      if (!Array.isArray(files)) throw new Error("CPA did not return an auth file list");
       const list = files.map((entry) => ({
         name: String(entry?.name ?? entry?.id ?? "").trim(),
         provider: providerType(String(entry?.provider ?? entry?.type ?? "")),
         label: String(entry?.label ?? entry?.email ?? "").trim(),
       })).filter((entry) => entry.name);
+      const names = new Set(list.map(({ name }) => name));
+      for (const name of credentialRouteResults.keys()) {
+        if (!names.has(name)) credentialRouteResults.delete(name);
+      }
       setCpaCredentials(list);
       if (!router) return list;
       const own = new Set((store.snapshot().routing.credentials ?? []).map((policy) => policy.authName));
@@ -1664,15 +1672,17 @@ function createProviderNetworkController({
       for (const credential of list) {
         const target = own.has(credential.name) ? `credential:${credential.name}` : credential.provider ? `provider:${credential.provider}` : "cpa";
         const url = routerUrlFor(target);
-        if (stampedProxyUrls.get(credential.name) === url) continue;
+        const previous = credentialRouteResults.get(credential.name);
+        if (previous === url || previous === null) continue;
         try {
           await cpaManagement("/v0/management/auth-files/fields", { method: "PATCH", body: { name: credential.name, proxy_url: url } });
-          stampedProxyUrls.set(credential.name, url);
+          credentialRouteResults.set(credential.name, url);
           routed += 1;
         } catch (error) {
+          // A failed save can leave the runtime and the file out of sync, even if a previous write succeeded.
+          if (error?.virtualAuth) credentialRouteResults.set(credential.name, null);
+          else credentialRouteResults.delete(credential.name);
           if (error?.code === "UNAUTHORIZED") throw error;
-          // A credential CPA won't change this way (a plugin's virtual one) keeps CPA's default route.
-          stampedProxyUrls.set(credential.name, url);
           logger.warn("proxy.cpa_credential_route_failed", { status: error?.status ?? null, error: String(error?.message || error).slice(0, 200) });
         }
       }
