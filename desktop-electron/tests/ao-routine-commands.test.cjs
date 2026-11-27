@@ -86,7 +86,8 @@ test("Approve for me runs routine project commands without asking: lockfile inst
     // The commands that waited 30 minutes in the user's /register chat and then were aborted.
     "npm ci --prefix frontend",
     "npm run dev --prefix frontend -- --host 127.0.0.1",
-    "npm --version && npx tsc -b",
+    // tsc itself, not `npx tsc`: npx fetches the unrelated npm package "tsc" where TypeScript is missing.
+    "npm --version && tsc -b",
     "npm install", "npm i --no-audit", "pnpm install --frozen-lockfile", "yarn install", "yarn",
     "pip install -r requirements.txt", "python -m pip install -r requirements-dev.txt", "uv sync", "poetry install",
     "npm test", "npm run build", "npm run lint", "pnpm run typecheck", "yarn build",
@@ -128,4 +129,29 @@ test("anything that adds, reaches out or escapes still goes to the reviewer", ()
     // cd with a target moves the shell (and chains), so only the bare form is routine.
     "cd ..", "cd C:\\", "cd src && del /q x", "pwd > out.txt",
   ]) assert.equal(routineCommand(command), null, `not routine: ${JSON.stringify(command)}`);
+});
+
+test("routine shapes that installed, deleted, wrote or read outside the project are no longer routine", () => {
+  // From the 2026-11-26 review: each of these ran with no review and no dialog on Approve for me.
+  for (const command of [
+    "npm install -D left-pad", "npm i -D attacker/repo", "yarn add -D evil", "yarn dlx -q evil", "npx tsc", "npx biome check",
+    "git branch -D main", "git branch -f main abc123", "git log -1 --format=x --output=package.json", "git diff --output=AGENTS.md",
+    "git diff --no-index /c/Users/me/.claude/.credentials.json /dev/null", "git show /etc/passwd",
+    "pytest --basetemp=src", "pytest -o cache_dir=../x", "mypy --python-executable=calc .",
+  ]) assert.equal(routineCommand(command), null, `not routine: ${JSON.stringify(command)}`);
+  for (const command of ["npm ci", "npm install", "npm ci --ignore-scripts", "yarn install --frozen-lockfile", "yarn build", "yarn run lint",
+    "git branch", "git branch -a", "git log -5 --oneline", "npx eslint src", "tsc --noEmit", "pytest tests", "pytest -p no:cacheprovider", "mypy src"]) {
+    assert.ok(routineCommand(command), `routine: ${command}`);
+  }
+});
+
+test("read-only inspection refuses options that run programs or write, provider paths and wildcard reads", () => {
+  for (const command of [
+    "rg --pre=calc .", "rg --pre calc foo", "rg -z needle", "rg -uu KEY", "rg --no-ignore KEY",
+    "sort -o AGENTS.md x.txt", "sort --output=x y", "git diff --output=AGENTS.md", "git diff --no-index a b",
+    "Get-ChildItem env:", "gc Env:CPA_KEY", "Get-Content variable:profile", "cat .en?", "Get-Content .e*",
+  ]) assert.equal(readOnlyInspection(command, FOLDER), null, `not read-only: ${command}`);
+  for (const command of ["rg foo src", "sort names.txt", "git diff", "git show HEAD:README.md", "Get-ChildItem -Recurse -Filter *.py"]) {
+    assert.ok(readOnlyInspection(command, FOLDER), `read-only: ${command}`);
+  }
 });

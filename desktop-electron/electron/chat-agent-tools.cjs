@@ -2162,7 +2162,8 @@ function createChatAgentTools({
       // counts as confirmed, so a routine approval the workspace asks for is not asked again.
       let routine = null;
       try { routine = entry.autoReview && !(typeof args.stdin === "string" && args.stdin) ? routineCommand(String(args.cmd ?? "")) : null; } catch { routine = null; }
-      if (routine) return true;
+      // The hard rules first, routine or not: a routine shape is never a pass for what they block.
+      if (routine && !blockedCommand(`${args.cmd ?? ""}`)) return true;
       const auto = entry.autoReview === true && !blockedCommand(`${args.cmd ?? ""}\n${args.stdin ?? ""}`);
       return ask("A chat agent wants to run a command",
         dialogText([...who(entry), ...describeCall(name, args, root),

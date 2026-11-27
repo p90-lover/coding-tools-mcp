@@ -4380,15 +4380,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // on a non-loopback host, chained or redirected shell, paths outside the project) still goes to
   // the reviewer, and its "ask" to the person.
   const ROUTINE_SEGMENT = [
-    // Lockfile installs: no package names, so nothing new enters the project.
-    /^(?:npm|pnpm)(?:\.cmd)?\s+(?:ci|install|i)(?:\s+--?[\w-]+(?:[=\s][\w./-]+)?)*$/i,
-    /^yarn(?:\.cmd)?(?:\s+install)?(?:\s+--?[\w-]+(?:[=\s][\w./-]+)?)*$/i,
+    // Lockfile installs: no package names, so nothing new enters the project. An option's value is
+    // attached with "=" only: `npm install -D left-pad` read `left-pad` as -D's value and installed it.
+    // Only these long options take a value after a space (`npm ci --prefix frontend`).
+    /^(?:npm|pnpm)(?:\.cmd)?\s+(?:ci|install|i)(?:\s+(?:--(?:prefix|omit|include|loglevel|cache|workspace|filter)\s+[\w./-]+|--?[\w-]+(?:=[\w./-]+)?))*$/i,
+    /^yarn(?:\.cmd)?(?:\s+install)?(?:\s+(?:--(?:cwd|cache-folder|modules-folder)\s+[\w./-]+|--?[\w-]+(?:=[\w./-]+)?))*$/i,
     /^(?:pip3?|python3?\s+-m\s+pip|py\s+-m\s+pip)(?:\.exe)?\s+install\s+-r\s+[\w./-]+(?:\s+--?[\w-]+)*$/i,
     /^(?:uv\s+sync|poetry\s+install|pipenv\s+(?:install|sync))(?:\s+--?[\w-]+)*$/i,
     // The project's own scripts and checks.
     /^(?:npm|pnpm)(?:\.cmd)?\s+(?:run(?:-script)?\s+[\w:.-]+|test|start|t)(?:\s+--?[\w-]+(?:[=\s][\w./:-]+)?)*(?:\s+--(?:\s+[\w./:=-]+)*)?$/i,
-    /^yarn(?:\.cmd)?\s+(?:run\s+)?[\w:.-]+(?:\s+--?[\w-]+(?:[=\s][\w./:-]+)?)*$/i,
-    /^(?:npx\s+)?(?:tsc|eslint|vitest|jest|prettier\s+--check|biome\s+(?:check|lint))(?:\s+[\w./*:=-]+)*$/i,
+    // A script by name; never yarn's own commands that fetch or run packages (`yarn add -D x`, `yarn dlx x`).
+    /^yarn(?:\.cmd)?\s+(?:run\s+)?(?!(?:add|dlx|up|upgrade|upgrade-interactive|remove|global|exec|create|link|unlink|unplug|set|config|plugin|node|import|patch|pack|publish|npm|policies|workspaces?)\b)[\w:.-]+(?:\s+--?[\w-]+(?:=[\w./:-]+)?)*$/i,
+    // npx only for tools whose npm name is the tool: `npx tsc` and `npx biome` fetch the unrelated
+    // packages named tsc and biome when the project has none installed.
+    /^(?:npx\s+)?(?:eslint|vitest|jest|prettier\s+--check)(?:\s+[\w./*:=-]+)*$/i,
+    /^(?:tsc|biome\s+(?:check|lint))(?:\s+[\w./*:=-]+)*$/i,
     /^(?:python3?\s+-m\s+)?(?:pytest|mypy|ruff\s+check)(?:\s+[\w./:=-]+)*$/i,
     /^(?:node|npm|pnpm|yarn|python3?|py|pip3?|uv|git|tsc|go|cargo|rustc)(?:\.cmd|\.exe)?\s+(?:--version|-v|-V|version)$/i,
     /^git\s+(?:status|diff|log|show|branch|rev-parse)(?:\s+[\w./:=-]+)*$/i,
@@ -4495,6 +4501,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const candidate = String(value ?? "").trim();
     if (!candidate) return true;
     if (/(?:^|[\\/])\.\.(?:[\\/]|$)/.test(candidate) || /^~(?:[\\/]|$)/.test(candidate)) return false;
+    // A PowerShell provider path is no file in the folder: `env:` and `Env:CPA_KEY` print the app's
+    // keys, `variable:`, `function:` and the registry hives read the shell's and machine's state.
+    if (/^(?:env|variable|function|alias|cert|hklm|hkcu|wsman|temp):/i.test(candidate)) return false;
     if (/^\/[a-z?]{1,2}$/i.test(candidate)) return true; // a cmd switch (dir /b, dir /ad, findstr /i)
     if (!/^(?:[a-z]:|[\\/])/i.test(candidate)) return true;
     const base = path.resolve(folder).toLowerCase(), target = path.resolve(candidate).toLowerCase();
@@ -4627,9 +4636,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         let at = 1;
         while (tokens[at] === "--no-pager" || (tokens[at] === "-C" && tokens[at + 1])) at += tokens[at] === "-C" ? 2 : 1;
         if (!tokens[at] || !GIT_READS.has(tokens[at].toLowerCase())) return null;
-        if (tokens.slice(at + 1).some((token) => /^(?:-O|--open-files-in-pager|--ext-diff)/.test(token))) return null;
+        // --output writes a file; --no-index reads any file on the machine; --textconv runs a driver.
+        if (tokens.slice(at + 1).some((token) => /^(?:-O|--open-files-in-pager|--ext-diff|--output|--no-index|--textconv)/.test(token))) return null;
         continue;
       }
+      // Options of these "readers" that start programs, write files or read what is hidden: rg's
+      // --pre runs a program per file and -z a decompressor, -u/--no-ignore searches ignored files
+      // (.env); GNU sort's -o/--output writes and --compress-program runs a program.
+      const verb = first?.toLowerCase();
+      if ((verb === "rg" || verb === "grep") && tokens.slice(1).some((token) => /^(?:--pre(?:-glob)?(?:=|$)|--search-zip|--unrestricted|--no-ignore|-[a-zA-Z]*[zu])/.test(token))) return null;
+      if (verb === "sort" && tokens.slice(1).some((token) => /^(?:-[a-zA-Z]*[oT]|--output|--compress-program|--temporary-directory|--files0-from)/.test(token))) return null;
+      // A wildcard path reads whatever matches (`cat .en?`, `Get-Content .e*`): the secret-name check sees only the pattern.
+      if (["cat", "type", "gc", "get-content", "head", "tail"].includes(verb)
+        && tokens.slice(1).some((token) => /[*?[]/.test(isQuoted(token) ? valueOf(token) : token))) return null;
       // A fragment that cannot start a command: a member after a parenthesis ((Get-Date).AddHours), a
       // number or an operator or switch ((-14), -not).
       if (first && /^(?:\.[A-Za-z_]\w*|[-+]?\d+(?:\.\d+)?|-[A-Za-z]\w*)$/.test(first)) continue;
@@ -4696,13 +4715,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           if (invoked) {
             const args = (invoked[4] ?? "").trim().match(new RegExp(NATIVE_ARG, "g")) ?? [];
             if (!args.every((arg) => arg.startsWith("-") || insideFolder(unquote(arg), folder))) return false;
-            scripts.push(invoked[1] || invoked[2] || invoked[3]);
+            const script = invoked[1] || invoked[2] || invoked[3];
+            // `& 'npx.ps1'` runs the npx.ps1 on PATH, not the folder's file read here: PowerShell
+            // never runs a bare name from the current folder. Only a path the folder's file is.
+            if (/^&/.test(step) && !/^(?:\.{1,2}[\\/]|[a-z]:[\\/]|[\\/])/i.test(script)) return false;
+            scripts.push(script);
             steps.push("Write-Output");
           } else steps.push(routineCommand(step) ? "Write-Output" : step);
         }
       }
       const rest = steps.filter((step) => step !== "Write-Output");
       if (rest.length && !readOnlyInspection(steps.join("; "), folder, cwd, { writes: true })) return false;
+      // A script is read here before the command runs: a step of the same command that writes could
+      // replace it in between (`Set-Content x.ps1 '…'; & .\x.ps1`), so a command that runs a script
+      // may otherwise only read.
+      if (scripts.length && rest.length && !readOnlyInspection(rest.join("; "), folder, cwd)) return false;
       for (const script of scripts) {
         const file = path.resolve(cwd || folder, script);
         const key = file.toLowerCase();
@@ -4734,8 +4761,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!segments?.length) return null;
     for (const segment of segments) {
       if (!ROUTINE_SEGMENT.some((pattern) => pattern.test(segment))) return null;
-      // Stay inside the project: relative paths only, no parent hops, drives or UNC.
-      if (/(?:^|\s|=)(?:\.\.(?:[\\/]|$)|[a-z]:[\\/]|[\\/]{2}|~[\\/])/i.test(segment)) return null;
+      // Stay inside the project: relative paths only, no parent hops, drives, UNC or rooted paths
+      // (`/c/Users/…` is C:\Users in Git Bash).
+      if (/(?:^|\s|=)(?:\.\.(?:[\\/]|$)|[a-z]:[\\/]|[\\/]|~[\\/])/i.test(segment)) return null;
+      // Options that write, delete or run something on a "read" or "check": git's --output and
+      // --no-index (reads any file), a branch delete or move, pytest's --basetemp (removed first)
+      // and config overrides, mypy's --python-executable.
+      if (/^git\s/i.test(segment) && /\s(?:--output|--no-index|--ext-diff|--textconv)\b/i.test(segment)) return null;
+      if (/^git\s+branch\b/i.test(segment) && !/^git\s+branch(?:\s+(?:-a|-r|-v|-vv|--all|--remotes|--list|--show-current))*$/i.test(segment)) return null;
+      if (/(?:^|\s)(?:pytest|mypy)\b/i.test(segment) && /\s(?:--basetemp|-o|--override-ini|--python-executable)\b/i.test(segment)) return null;
       // A dev server is reachable from this machine only.
       const host = /--host(?:=|\s+)(\S+)/i.exec(segment)?.[1];
       if (host && !/^(?:127\.0\.0\.1|localhost|::1)$/i.test(host)) return null;
@@ -5933,16 +5967,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       : exhausted
       ? judges ? { action: "deny", unavailable: true, reason_code: "reviewer_unavailable", reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so this request was not judged (Let the model judge is on)` }
         : { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so check it yourself` }
-      : routineAppTool(approval.tool)
+      // The hard deny list wins over every routine shortcut: an app read of .env, or a blocked command
+      // through the app's own exec_command, is denied like the agent's own read or shell line.
+      : !blocked && routineAppTool(approval.tool)
       ? { action: "allow", actor: "safety_rules", reason_code: "routine_tool", reason: routineAppTool(approval.tool) }
-      : githubRead(approval.tool)
+      : !blocked && githubRead(approval.tool)
       ? { action: "allow", actor: "safety_rules", reason_code: "github_read", reason: githubRead(approval.tool) }
       // The hard deny list still wins: a blocked command typed into an allowed app is not a routine step.
       : !blocked && inAllowedApp(workspaceId, approval)
       ? { action: "allow", actor: "safety_rules", reason_code: "allowed_app_step", reason: inAllowedApp(workspaceId, approval) }
-      : attachedFileRead(approval)
+      : !blocked && attachedFileRead(approval)
       ? { action: "allow", actor: "safety_rules", reason_code: "attached_file_read", reason: attachedFileRead(approval) }
-      : !incomplete && routineAppCommand(approval)
+      : !blocked && !incomplete && routineAppCommand(approval)
       ? { action: "allow", actor: "safety_rules", reason_code: "routine_command", reason: routineAppCommand(approval) }
       : incomplete && !blocked && judges
       ? await askApprover({ approver, mission, approval, decide: true, partial: true, judge: true, check, signal, verifyCurrent }).then(verdict => ({ ...verdict, reviewed: true }),
