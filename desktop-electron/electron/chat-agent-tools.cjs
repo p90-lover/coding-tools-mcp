@@ -872,6 +872,20 @@ function windowsQuirk(part, { write = false } = {}) {
 /** The name Windows opens for a path part, lower-cased: `.git.`, `.GIT ` and `.git::$DATA` all open `.git`. */
 const effectiveName = (part) => part.split(":")[0].replace(/[. ]+$/, "").toLowerCase();
 const protectedName = (part) => part !== "." && part !== ".." && PROTECTED_NAMES.has(effectiveName(part));
+/**
+ * Whether path parts (from the worktree root) name a file a chat's own harness reads its
+ * permission rules from. AO starts Claude Code with the project's and local settings, so an
+ * allow rule patched into .claude/settings(.local).json lets the agent's later calls run with no
+ * permission request, while the app still trusts that the reviewer saw them (reviewedUpstream);
+ * opencode's root config and Codex's project config carry the same kind of rules.
+ */
+function harnessPermissionFile(parts) {
+  const names = parts.filter((part) => part && part !== "." && part !== "..").map(effectiveName);
+  const last = names.at(-1) ?? "", parent = names.at(-2) ?? "";
+  return (parent === ".claude" && /^settings(?:\.local)?\.json$/.test(last))
+    || (parent === ".codex" && last === "config.toml")
+    || (names.length === 1 && /^opencode\.jsonc?$/.test(last));
+}
 
 /**
  * A path argument, scoped to the session's worktree: relative to its root, refused if it resolves
@@ -901,6 +915,9 @@ async function scopePath(root, raw, label, { write = false } = {}) {
     const realRelative = path.relative(root.real, real);
     const canonical = realRelative ? realRelative.split(path.sep) : [];
     if ([...parts, ...canonical].some(protectedName)) throw outside("git's own data and protected folders are never patched");
+    if (harnessPermissionFile(parts) || harnessPermissionFile(canonical)) {
+      throw outside("an agent harness's permission settings are changed by the person, never by a chat's own patch");
+    }
   }
   return relative.split(path.sep).join("/") || ".";
 }

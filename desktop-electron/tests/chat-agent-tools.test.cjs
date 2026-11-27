@@ -2482,6 +2482,27 @@ test("Windows spellings that open another file are refused, and patches never wr
   } finally { await tools.close(); tree.cleanup(); }
 });
 
+test("a chat's patch never changes an agent harness's permission settings", async () => {
+  // AO starts Claude Code with the project's and local settings: an allow rule patched in there
+  // would let the agent's later calls run with no permission request at all.
+  const tree = tempTree();
+  const { tools, calls } = fixture({ root: tree.root });
+  try {
+    const { url, auth } = await session(tools);
+    const before = calls.length;
+    for (const target of [".claude/settings.local.json", ".claude/settings.json", ".Claude/Settings.Local.json", ".codex/config.toml", "opencode.json", "opencode.jsonc"]) {
+      const refused = await callTool(url, auth, "apply_patch", { patch: `*** Begin Patch\n*** Add File: ${target}\n+{}\n*** End Patch\n` });
+      assert.equal(refused.isError, true, target);
+      assert.match(refused.content[0].text, /permission settings are changed by the person/, target);
+    }
+    assert.equal(calls.length, before, "none reached the service");
+    for (const allowed of [".claude/commands/review.md", "docs/opencode.json", "src/settings.json", ".claude/agents/x.md"]) {
+      const patched = await callTool(url, auth, "apply_patch", { patch: `*** Begin Patch\n*** Add File: ${allowed}\n+x\n*** End Patch\n` });
+      assert.equal(patched.isError, false, allowed);
+    }
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
 test("windowsQuirk names every spelling Windows would open as another file; device and short names only for writes", () => {
   for (const part of [".git.", ".git ", ".git::$DATA", "x:y", "PRN "]) {
     assert.ok(windowsQuirk(part), part);

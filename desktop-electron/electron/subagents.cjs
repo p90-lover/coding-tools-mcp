@@ -13,9 +13,14 @@
 // - One level: a subagent's own session gets no subagent tools (chat-agent-tools.cjs).
 // - A chat agent sees only the subagents it started.
 
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { gitPushRequest } = require("./git-remote.cjs");
+// AO drops a message whose client id it has seen in that conversation (202, no turn). A run's
+// counters start again after an app restart and recoveries restart with each turn, so every id
+// carries this process's own nonce: a follow-up after a restart is never taken for an old one.
+const MESSAGE_NONCE = crypto.randomBytes(4).toString("hex");
 
 const EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 const PERMISSIONS = new Set(["auto", "full"]);
@@ -533,7 +538,9 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     if (!continuable || run.stopping || !ACTIVE.has(run.state)) return false;
     run.recoveries = tries + 1;
     try {
-      const sent = await service.send(run.id, RECOVER_NOTE, `subagent:${run.id}:recover:${run.recoveries}`);
+      // recoveries restart with each turn; the send count never does (and the nonce covers restarts).
+      run.recoverSends = (run.recoverSends ?? 0) + 1;
+      const sent = await service.send(run.id, RECOVER_NOTE, `subagent:${run.id}:recover:${MESSAGE_NONCE}:${run.recoverSends}`);
       // A resumed turn gets the whole time limit again, as a follow-up does (check).
       Object.assign(run, { turnId: sent?.turnId ?? run.turnId, state: "starting", released: false, misses: 0, recovering: null,
         turns: (run.turns ?? 1) + 1, turnStartedAt: now() });
@@ -939,7 +946,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     if (!body) throw new Error("Write the message for the subagent");
     if (run.stopping) throw new Error("This subagent is stopping; message it once subagent_result shows it stopped");
     if (run.resuming) throw new Error("This subagent is already taking a message; wait for it");
-    const messageId = () => `subagent:${run.id}:${(run.messages = (run.messages ?? 0) + 1)}`;
+    const messageId = () => `subagent:${run.id}:${MESSAGE_NONCE}:${(run.messages = (run.messages ?? 0) + 1)}`;
     // Read first: one that finished since the last poll takes a new turn, not a steer.
     if (ACTIVE.has(run.state)) await check(run).catch(() => undefined);
     if (run.stopping) throw new Error("This subagent is stopping; message it once subagent_result shows it stopped");
