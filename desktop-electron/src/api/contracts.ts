@@ -270,14 +270,14 @@ export interface CodingToolsApi {
     list(): Promise<JsonObject>;
     catalog(): Promise<JsonObject>;
     call(input: {
-      readonly moduleId: "cpa" | "paseo" | "anneal" | "agent-orchestrator" | "antigravity-cli";
+      readonly moduleId: "cpa" | "paseo" | "anneal" | "agent-orchestrator" | "antigravity-cli" | "ssh-connections";
       readonly operation: string;
       readonly requestId?: string;
       readonly arguments?: JsonObject;
     }): Promise<JsonObject>;
     invoke(input: {
-      readonly handle?: "cpa" | "paseo" | "anneal" | "agent-orchestrator" | "antigravity-cli";
-      readonly moduleId?: "cpa" | "paseo" | "anneal" | "agent-orchestrator" | "antigravity-cli";
+      readonly handle?: "cpa" | "paseo" | "anneal" | "agent-orchestrator" | "antigravity-cli" | "ssh-connections";
+      readonly moduleId?: "cpa" | "paseo" | "anneal" | "agent-orchestrator" | "antigravity-cli" | "ssh-connections";
       readonly operation: string;
       readonly requestId?: string;
       readonly arguments?: JsonObject;

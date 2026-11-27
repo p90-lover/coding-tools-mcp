@@ -8,6 +8,22 @@ const path = require("node:path");
 const CONTENT_TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2", ".wasm": "application/wasm" };
 const HEADER_TIMEOUT_MS = 180_000;
 const BLOCKED_PATH = /^\/(?:internal|shutdown)(?:\/|$)|^\/api\/v1\/(?:mobile|cloud|remotes|dev)(?:\/|$)|\/preview\/server\/?$/;
+// The SSH terminal capability token's header (agent-orchestrator-upstream.cjs). AO lets a terminal
+// websocket that brought it attach to an SSH terminal, and its SSH route and an SSH terminal's
+// close need it. The AO page never has it: this gateway puts it on the page's /mux upgrade alone,
+// in place of anything the page sent, and takes it off every other request it passes on.
+const SSH_TOKEN_HEADER = "x-ao-ssh-terminal-token";
+
+/** A copy of the request's headers without the SSH token's, in any spelling a server could read as it. */
+function withoutSshToken(headers) {
+  return Object.fromEntries(Object.entries(headers)
+    .filter(([name]) => name.toLowerCase().replaceAll("_", "-").trim() !== SSH_TOKEN_HEADER));
+}
+
+/** The one websocket the token goes with: AO's terminal mux, by its exact path (a query may follow). */
+function muxRequest(url) {
+  return String(url).split("?")[0] === "/mux";
+}
 
 async function readJson(request) {
   const chunks = [];
@@ -20,7 +36,9 @@ async function readJson(request) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
 }
 
-function createAgentOrchestratorGateway({ rendererRoot, daemonPort, getStatus, desktopRequest, beginMutation = () => () => {} }) {
+function createAgentOrchestratorGateway({ rendererRoot, daemonPort, getStatus, desktopRequest, beginMutation = () => () => {}, sshTerminalToken = null }) {
+  // Only a token the upstream made (64 hex characters) is ever sent.
+  const sshToken = typeof sshTerminalToken === "string" && /^[0-9a-f]{64}$/.test(sshTerminalToken) ? sshTerminalToken : null;
   const bootstrap = crypto.randomBytes(32).toString("hex");
   const sessionKey = crypto.randomBytes(32).toString("hex");
   const cookieName = `ao_${crypto.randomBytes(8).toString("hex")}`;
@@ -42,7 +60,8 @@ function createAgentOrchestratorGateway({ rendererRoot, daemonPort, getStatus, d
   }
 
   function proxy(request, response, body) {
-    const headers = { ...request.headers, host: `127.0.0.1:${daemonPort}`, origin, cookie: "" };
+    // Never with the SSH token: the page may not open, attach to or close an SSH terminal itself.
+    const headers = { ...withoutSshToken(request.headers), host: `127.0.0.1:${daemonPort}`, origin, cookie: "" };
     if (body) { delete headers["transfer-encoding"]; headers["content-length"] = String(body.length); }
     const upstream = http.request({
       hostname: "127.0.0.1", port: daemonPort, path: request.url, method: request.method,
@@ -144,7 +163,12 @@ function createAgentOrchestratorGateway({ rendererRoot, daemonPort, getStatus, d
     // Node drops the server's socket error handler on upgrade: a reset from the AO window (closed
     // or reloaded mid-connect) before the upstream answers was an uncaught 'error'.
     client.on("error", () => client.destroy());
-    const upstream = http.request({ hostname: "127.0.0.1", port: daemonPort, path: request.url, headers: { ...request.headers, host: `127.0.0.1:${daemonPort}`, origin, cookie: "" } });
+    // The AO page's terminals attach here, the SSH terminal of the hosts page among them, so the mux
+    // gets the token; whatever the page sent under that name is dropped first. Any other path
+    // passed on here (/mux/...) goes without it.
+    const headers = { ...withoutSshToken(request.headers), host: `127.0.0.1:${daemonPort}`, origin, cookie: "",
+      ...(sshToken && muxRequest(request.url) ? { [SSH_TOKEN_HEADER]: sshToken } : {}) };
+    const upstream = http.request({ hostname: "127.0.0.1", port: daemonPort, path: request.url, headers });
     const headerDeadline = setTimeout(() => upstream.destroy(), 20000);
     pendingRequests.add(upstream);
     upstream.once("close", () => { clearTimeout(headerDeadline); pendingRequests.delete(upstream); });

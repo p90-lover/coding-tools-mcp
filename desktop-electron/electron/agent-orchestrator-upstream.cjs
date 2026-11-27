@@ -212,6 +212,19 @@ const TUI_SILENT_MS = 30 * 60_000;
 const TERMINAL_TURN_STATES = new Set(["completed", "failed", "interrupted", "cancelled", "recovered"]);
 const TUI_RESULT_INSTRUCTION = `When the assignment is finished, write your complete final report (what you did and the evidence) to ${TUI_RESULT_FILE} at the root of your working directory, then stop and wait.`;
 
+// The header AO's SSH route, and the terminal mux for SSH terminals, read the capability token from
+// (see createAgentOrchestratorUpstream). The gateway uses the same name.
+const SSH_TOKEN_HEADER = "x-ao-ssh-terminal-token";
+const TERMINAL_HANDLE = /^[\w:.-]{1,200}$/;
+/**
+ * Whether a handle is one AO gave an SSH terminal: it holds AO's SSH prefix (shellterm ssh.go
+ * sshHandlePrefix), read without case. Not only at the start: on macOS and Linux AO wraps the id
+ * ("ptyhost-v1:shellterm-ssh-…") and protects it all the same. AO's own terminal route reads it so.
+ */
+function sshHandle(handle) {
+  return String(handle).toLowerCase().includes("shellterm-ssh-");
+}
+
 const CLIPBOARD_PERMISSIONS = new Set(["clipboard-read", "clipboard-sanitized-write"]);
 const TRUSTED_TERMINAL_LINK_HOSTS = new Set(["accounts.google.com", "antigravity.google"]);
 
@@ -283,7 +296,27 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   readySlowMs = 30000, readyLimitMs = AO_READY_TIMEOUT_MS, readyHardMs = readyLimitMs * AO_READY_PATIENCE,
   readyStallMs = AO_START_STALL_MS, readyProgressMaxMs = AO_START_PROGRESS_MAX_MS,
   startCooldownMs = AO_START_COOLDOWN_MS, provisionResumeWaitsMs = PROVISION_RESUME_WAITS_MS,
-  gatewayKey = async () => null, gatewayKeyChecksMs = GATEWAY_KEY_CHECKS_MS }) {
+  gatewayKey = async () => null, gatewayKeyChecksMs = GATEWAY_KEY_CHECKS_MS, sshKnownHostsFile = null }) {
+  // The in-app SSH terminal (Connections > SSH hosts). AO's daemon answers any local process with
+  // no sign-in, so its SSH route and the SSH terminals it opens take a capability token that only
+  // this process holds: random, kept in this closure and handed to the daemon in its spawn
+  // environment alone (AO reads it and removes it from its own environment, so no agent it starts
+  // inherits it). It is never logged, never written to disk, never put in process.env, never sent
+  // to a window, and never in an error. The page reaches the daemon only through the gateway,
+  // which adds it to the terminal websocket (/mux) and strips it everywhere else. Without the
+  // pinned-keys file the route stays off.
+  //
+  // A new one is made for each daemon start (start()), not once for the upstream: a daemon too old
+  // to remove it from its environment would hand it to its agents, and those can outlive that
+  // daemon; what they hold then opens nothing on the next one. A daemon restart also ends every SSH
+  // session: in this app each daemon boot gets a new app run id and reaps the transient terminals
+  // of the one before, so an SSH terminal fails closed with its daemon (review, 2026-11-27).
+  const sshKnownHosts = typeof sshKnownHostsFile === "string" && path.isAbsolute(sshKnownHostsFile) ? sshKnownHostsFile : null;
+  let sshTerminalToken = crypto.randomBytes(32).toString("hex");
+  // Read at the moment a request goes out, for the daemon that is running then (sshDaemonCall).
+  const sshTokenHeaders = () => ({ [SSH_TOKEN_HEADER]: sshTerminalToken });
+  // The SSH terminals this upstream opened: only those are closed with the token (closeTerminal).
+  const sshHandles = new Set();
   let child = null;
   let gateway = null;
   let view = null;
@@ -463,7 +496,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     finally { release?.(); }
   }
 
-  async function requestDaemon(method, endpoint, body, { maxBytes, timeoutMs, preserveInlineBlobs = false } = {}) {
+  // `headers` are extra request headers for this process's own calls (the SSH token); no call the
+  // window or the AO page makes reaches here with any.
+  async function requestDaemon(method, endpoint, body, { maxBytes, timeoutMs, preserveInlineBlobs = false, headers = null } = {}) {
     const waitMs = Number.isSafeInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : method === "GET" ? 30000 : 180000;
     // From a worker: the chat's session and conversation reads come here 17 times a second with two
     // chats working, and on main a socket write that a network filter held froze every window.
@@ -474,7 +509,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     const tooLarge = () => new Error(`AO response exceeds the handler limit (${method} ${endpoint.split("?")[0]})`);
     let response;
     try {
-      response = await fetchOffThread(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", maxBytes: limit, signal: AbortSignal.timeout(waitMs) });
+      response = await fetchOffThread(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { ...headers, "content-type": "application/json" }, body, redirect: "error", maxBytes: limit, signal: AbortSignal.timeout(waitMs) });
     } catch (error) {
       if (error?.code === "ERR_RESPONSE_TOO_LARGE") throw tooLarge();
       throw error;
@@ -491,6 +526,18 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     return { ok: response.ok, status: response.status, data };
   }
 
+  /**
+   * A call that carries the SSH token, to the daemon running now. It never starts AO: the token is
+   * read in the same turn as requestApi's check that AO is ready, so it is that daemon's own. (Read
+   * before a start that internalApi makes, it was an older daemon's.) The caller starts AO first
+   * when it wants one.
+   */
+  async function sshDaemonCall(method, endpoint, body) {
+    const result = await requestApi(method, endpoint, body === undefined ? undefined : JSON.stringify(body), { headers: sshTokenHeaders() });
+    if (!result.ok) throw aoFailure(result);
+    return result.data;
+  }
+
   // AO's error envelope is { error: <kind>, code, message }; the message says what was wrong.
   function aoErrorMessage(result) {
     const data = result.data;
@@ -498,6 +545,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       || `AO request failed (${result.status})`;
     const code = typeof data?.code === "string" && data.code ? ` (${data.code})` : "";
     return `${message}${code}`.slice(0, 300);
+  }
+  /** A refused AO call as an Error with its HTTP status and AO's error code, as internalApi makes it. */
+  function aoFailure(result) {
+    const error = new Error(aoErrorMessage(result));
+    error.status = result.status;
+    const code = result.data?.code ?? result.data?.error?.code;
+    if (typeof code === "string" && /^[A-Z0-9_]{1,80}$/.test(code)) error.code = code;
+    return error;
   }
   /**
    * Whether the chat host recorded for an AO session (dataRoot/chat-hosts/<id>/host.json) is
@@ -2259,12 +2314,57 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         shell: executable, env, ...(projectId ? { projectId } : {}),
       });
       const terminal = data?.shellTerminal;
-      if (typeof terminal?.handleId !== "string" || !/^[\w:.-]{1,200}$/.test(terminal.handleId)) throw new Error("AO did not open the terminal");
+      if (typeof terminal?.handleId !== "string" || !TERMINAL_HANDLE.test(terminal.handleId)) throw new Error("AO did not open the terminal");
       return { handle: terminal.handleId, generation: String(terminal.createdAt || terminal.handleId), workingDir: terminal.workingDir };
     },
-    async closeTerminal(handle) {
-      if (typeof handle !== "string" || !/^[\w:.-]{1,200}$/.test(handle)) throw new Error("A valid terminal handle is required");
-      await internalApi("DELETE", `/api/v1/shell-terminals/${encodeURIComponent(handle)}`);
+    /**
+     * An SSH terminal to an approved host (ssh-connections.cjs is the only caller, from the hosts
+     * page). AO builds the ssh command line itself from these typed fields, with the app's pinned
+     * keys file, so nothing here is a command line. The route takes the capability token; AO hides
+     * the terminal from its shared list and lets only a token holder attach to it or close it. The
+     * terminal works in AO's own private folder, so `workspaceId` is not sent.
+     */
+    async openSshTerminal({ host, port, user, identityFile = null, title, client = null, workspaceId: _workspaceId } = {}) {
+      if (!sshKnownHosts) throw Object.assign(new Error("SSH terminals are off in this app"), { code: "SSH_TERMINAL_DISABLED" });
+      if (typeof host !== "string" || !host || typeof user !== "string" || !user || !Number.isInteger(port)) throw new Error("An SSH host, port and user are required");
+      if (identityFile !== null && (typeof identityFile !== "string" || !identityFile)) throw new Error("An SSH key file must be a path");
+      if (typeof title !== "string" || !title.trim()) throw new Error("An SSH terminal needs a title");
+      const version = client && Number.isInteger(client.major) && Number.isInteger(client.minor) ? { major: client.major, minor: client.minor } : null;
+      // Started first: each daemon start makes its own token, and the header names the running one.
+      await start();
+      sharedReads.clear();
+      const data = await sshDaemonCall("POST", "/api/v1/shell-terminals/ssh", {
+        host, port, user, ...(identityFile ? { identityFile } : {}), title, ...(version ? { client: version } : {}),
+      });
+      const terminal = data?.shellTerminal;
+      if (typeof terminal?.handleId !== "string" || !TERMINAL_HANDLE.test(terminal.handleId)) throw new Error("AO did not open the terminal");
+      sshHandles.add(terminal.handleId);
+      return { handle: terminal.handleId, generation: String(terminal.createdAt || terminal.handleId), title };
+    },
+    /**
+     * Closes an AO terminal. `ssh: true` (the SSH hosts store, for a terminal openSshTerminal opened)
+     * sends the token AO asks for before it closes an SSH terminal. Every other caller (the
+     * Antigravity CLI page's Close, which takes any handle the window names) goes without it, so it
+     * can close no SSH terminal: AO answers those as unknown.
+     */
+    async closeTerminal(handle, { ssh = false } = {}) {
+      if (typeof handle !== "string" || !TERMINAL_HANDLE.test(handle)) throw new Error("A valid terminal handle is required");
+      const endpoint = `/api/v1/shell-terminals/${encodeURIComponent(handle)}`;
+      if (ssh !== true) {
+        await internalApi("DELETE", endpoint);
+        return;
+      }
+      if (!sshHandles.has(handle)) throw new Error("That SSH terminal was not opened here");
+      // An SSH close never starts AO (the SSH hosts store closes its terminals while the app quits or
+      // its backend restarts, when this upstream is stopping or stopped). A daemon that is not running
+      // has ended its SSH sessions with it, and one AO no longer has (404) is closed too.
+      if (state !== "ready") { sshHandles.delete(handle); return; }
+      try {
+        await sshDaemonCall("DELETE", endpoint);
+      } catch (error) {
+        if (error?.status !== 404 && state === "ready") throw error;
+      }
+      sshHandles.delete(handle);
     },
   });
 
@@ -2470,7 +2570,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         const allocatedPort = await allocatePort();
         checkStartup();
         daemonPort = allocatedPort;
+        // This daemon's SSH token (see sshTerminalToken): the gateway and the spawn get the same one.
+        sshTerminalToken = crypto.randomBytes(32).toString("hex");
         gateway = createAgentOrchestratorGateway({ rendererRoot: path.join(resourceRoot, "renderer"), daemonPort, getStatus: snapshot, desktopRequest,
+          // Put on the AO page's terminal websocket only (see the gateway); null while the route is off.
+          sshTerminalToken: sshKnownHosts ? sshTerminalToken : null,
           beginMutation: () => {
             if (startupGeneration !== lifecycleGeneration || !readyOwner()) throw new Error("AO is not ready for changes");
             return daemonProcess.beginMutation();
@@ -2485,6 +2589,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // Tool-scoped values (e.g. the agy proxy) live only in the daemon's memory.
         // It may wait briefly (rtk's automatic install), so the start is checked again after it.
         Object.assign(environment, await extraEnv());
+        // The SSH route's two settings come from this upstream alone (sshEnvironment, added last
+        // below): none inherited or from extraEnv survives, in any letter case (Windows reads
+        // variable names without case).
+        for (const key of Object.keys(environment)) if (/^AO_SSH_/i.test(key)) delete environment[key];
         daemonGatewayKey = String(environment.CODING_TOOLS_CPA_KEY ?? "").trim();
         checkStartup();
         const toolBin = await extraPath();
@@ -2497,6 +2605,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // tool runs: on Windows it carries SystemRoot, TEMP and the rest a process needs to start,
         // and a de-duplicated PATH of bounded length (forks failed with 0xC0000142 without them).
         const daemonEnvironment = windowsChildEnvironment(environment, { system: systemEnvironment() });
+        // AO turns its SSH route on only with both; it reads the token and drops it from its own environment.
+        const sshEnvironment = sshKnownHosts ? { AO_SSH_KNOWN_HOSTS: sshKnownHosts, AO_SSH_TERMINAL_TOKEN: sshTerminalToken } : {};
         const profiler = await profilerAddress(dataRoot);
         checkStartup();
         if (profiler) logger.info?.("ao.profiler_enabled", { address: profiler });
@@ -2514,7 +2624,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             // its handshake) took longer on a busy machine: the chat failed with SPAWN_TIMEOUT
             // while the agent came up seconds later. Just under this app's own 180 s for a POST,
             // so AO answers with its error before the app stops waiting.
-            AO_REQUEST_TIMEOUT: "170s" },
+            AO_REQUEST_TIMEOUT: "170s", ...sshEnvironment },
         });
         const currentChild = child;
         logTail = "";
@@ -2706,8 +2816,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     };
     if (terminal && showRequest === showGeneration && viewGeneration === lifecycleGeneration && view === showingView) {
       const handle = String(terminal.handle || "");
-      if (!/^[\w:.-]{1,200}$/.test(handle)) throw new Error("A valid terminal handle is required");
-      const query = new URLSearchParams({ handle, generation: String(terminal.generation || handle).slice(0, 200), title: String(terminal.title || "Terminal").slice(0, 80) });
+      if (!TERMINAL_HANDLE.test(handle)) throw new Error("A valid terminal handle is required");
+      const query = new URLSearchParams({ handle, generation: String(terminal.generation || handle).slice(0, 200), title: String(terminal.title || "Terminal").slice(0, 80),
+        // AO's terminal in remote mode (an SSH session): what the server prints opens no link, a
+        // paste loses its control characters, a dropped file types nothing. A handle AO gave an SSH
+        // terminal (its own prefix) is shown that way whoever asks without saying so: the window's
+        // upstream_show takes any handle.
+        ...(terminal.remote === true || sshHandle(handle) ? { remote: "1" } : {}) });
       const current = new URL(showingView.webContents.getURL());
       if (!current.hash.startsWith("#/coding-tools-terminal") && !current.hash.startsWith("#/coding-tools-board")) originalPath = current.pathname + current.search + current.hash;
       const target = `/#/coding-tools-terminal?${query}`;

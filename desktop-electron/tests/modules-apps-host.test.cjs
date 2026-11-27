@@ -12,8 +12,8 @@ const desktopRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(desktopRoot, "..");
 const read = (relativePath) => fs.readFileSync(path.join(desktopRoot, relativePath), "utf8");
 
-test("app-handler tree exposes CPA, the orchestrator and the Antigravity CLI tool", () => {
-  assert.deepEqual(MODULE_IDS, ["cpa", "agent-orchestrator", "antigravity-cli"]);
+test("app-handler tree exposes CPA, the orchestrator, the Antigravity CLI tool and the SSH hosts", () => {
+  assert.deepEqual(MODULE_IDS, ["cpa", "agent-orchestrator", "antigravity-cli", "ssh-connections"]);
   assert.equal(MODULE_IDS.includes("commandcode"), false);
   assert.deepEqual(FOREIGN_SLOTS, ["cpa"]);
   const folderIds = fs.readdirSync(path.join(repoRoot, "app-handler"), { withFileTypes: true })
@@ -21,7 +21,7 @@ test("app-handler tree exposes CPA, the orchestrator and the Antigravity CLI too
     .map((entry) => entry.name)
     .sort();
   assert.deepEqual([...MODULE_IDS].sort(), folderIds);
-  for (const id of MODULE_IDS.filter((id) => !["agent-orchestrator", "antigravity-cli"].includes(id))) {
+  for (const id of MODULE_IDS.filter((id) => !["agent-orchestrator", "antigravity-cli", "ssh-connections"].includes(id))) {
     assert.equal(fs.existsSync(path.join(repoRoot, "app-handler", id, "handler.cjs")), true, id);
     assert.equal(fs.existsSync(path.join(repoRoot, "app-handler", id, "handlers.cjs")), true, id);
     assert.equal(fs.existsSync(path.join(repoRoot, "app-handler", id, "module.json")), true, id);

@@ -12,7 +12,7 @@ const HARNESS_METHODS = Object.freeze([
   "quietWorkingChatSessions", "staleSessions", "send", "steer", "kill",
   "sessionWorkspace", "anySessionWorking", "warmSessions", "resolveInput",
   "resolveApproval", "timeline", "compact", "compactionStatus", "interrupt",
-  "openTerminal", "closeTerminal",
+  "openTerminal", "openSshTerminal", "closeTerminal",
 ]);
 
 // Shape compatibility is not proof of an engine's behavioral compatibility.

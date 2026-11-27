@@ -1,0 +1,7 @@
+{
+  "id": "ssh-connections",
+  "name": "SSH hosts",
+  "kind": "app-store",
+  "transport": "in-process",
+  "note": "The SSH hosts the person approved, each with the host key they confirmed. Only the focused app window may change the list; agents cannot list, describe or call this module. The store, validation and ssh command lines live in desktop-electron/electron/ssh-connections.cjs; key files are named by path only and never read."
+}

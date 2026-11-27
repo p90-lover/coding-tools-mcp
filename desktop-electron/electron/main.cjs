@@ -358,6 +358,9 @@ let cpaUpdater = null;
 let appPluginsService = null;
 // The Antigravity CLI service, made with the backend (startBackendFrom); App plugins updates it.
 let antigravityCliService = null;
+// The SSH hosts the person approved and their pinned host keys (ssh-connections.cjs), made with the
+// backend. One store at a time: a backend restart stops the old one before the new one reads the file.
+let sshConnectionsService = null;
 let externalServicesController = null;
 let managedBootstrapController = null;
 let upstreamToolController = null;
@@ -768,7 +771,8 @@ async function refreshPart(part, logger) {
       if (operation) throw new Error(`Another launcher operation is active: ${operation}`);
       return runtimeSupervisor.restartTunnelOnly();
     },
-    "agent-orchestrator": async () => { await agentOrchestratorUpstream?.stop(); return agentOrchestratorUpstream?.start(); },
+    // A daemon restart ends the SSH hosts page's terminal: it is closed first, while AO answers.
+    "agent-orchestrator": async () => { await sshConnectionsService?.closeAll("ao_restart"); await agentOrchestratorUpstream?.stop(); return agentOrchestratorUpstream?.start(); },
     cpa: () => externalServicesController.restart("cpa"),
     headless: async () => { await headlessHost?.shutdown("part-refresh"); return headlessHost?.ensureStarted(); },
     // Reload the whole backend tier from the active bundle; the core keeps running.
@@ -1930,6 +1934,9 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
   window.webContents.on("did-start-navigation", (_event, url, inPlace, isMainFrame) => {
     if (mainWindow === window && isMainFrame && !inPlace && rendererNavigationAllowed(url)) {
       registerHost?.setSurfaceActive(false);
+      // The SSH hosts page's terminal goes with the page (a reload, a new page): nothing could
+      // reach it after. A hash route change is the same document (inPlace) and keeps it.
+      void sshConnectionsService?.closeAll("navigation");
     }
   });
   window.webContents.setWindowOpenHandler(({ url }) => {
@@ -1975,6 +1982,8 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
   };
   window.webContents.on("render-process-gone", (_event, details) => {
     if (mainWindow === window) registerHost?.setSurfaceActive(false);
+    // The page is gone, and with it the only way to the SSH terminal it opened.
+    if (mainWindow === window) void sshConnectionsService?.closeAll("renderer_gone");
     logger.warn("launcher.renderer_gone", { reason: details?.reason, exitCode: details?.exitCode });
     if (details?.reason === "clean-exit") return;
     recoverRenderer("gone");
@@ -1983,6 +1992,8 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
   // errors (logged, so a blank window says why).
   const watchdog = createRendererWatchdog({ window, logger, recover: recoverRenderer });
   window.on("closed", () => watchdog.dispose());
+  // The window that held the SSH hosts page is gone: so is its terminal.
+  window.webContents.once("destroyed", () => { void sshConnectionsService?.closeAll("window_destroyed"); });
   window.on("closed", () => {
     if (mainWindow === window) {
       mainWindow = null;
@@ -2978,7 +2989,13 @@ function registerIpc({ logger, stateStore }) {
     const passiveAoLayout = input.moduleId === "agent-orchestrator"
       && (["upstream_bounds", "upstream_hide", "chat_preview_show", "chat_preview_hide", "chat_preview_snapshot", "archived_chats", "chat_prewarm", "chat_draft"].includes(input.operation)
         || (["chat_auto_retry", "chat_model_judges", "chat_auto_compact", "chat_question_timeout"].includes(input.operation) && input.arguments?.enabled === undefined && input.arguments?.percent === undefined && input.arguments?.seconds === undefined && input.arguments?.meteredReviews === undefined && input.arguments?.autoReviewAll === undefined));
-    const readOnly = appsHost.isReadOnly(input.moduleId, input.operation);
+    // SSH hosts: only its list is a read, whatever the module's own table says. Adding a host,
+    // fetching or confirming a host key and removing a host run only from the focused window. The
+    // host trims the id and also takes the whole call as one object in its place, so the module and
+    // the operation are read here the way the host reads them.
+    const called = input.moduleId && typeof input.moduleId === "object" && !Array.isArray(input.moduleId) ? input.moduleId : input;
+    const sshHostsChange = String(called.moduleId || called.handle || "").trim() === "ssh-connections" && called.operation !== "list";
+    const readOnly = !sshHostsChange && appsHost.isReadOnly(input.moduleId, input.operation);
     // These two status clocks also run while minimized. Only the trusted main frame may read them.
     const backgroundRead = readOnly && input.moduleId === "agent-orchestrator"
       && ["run_status", "subagents_runs"].includes(input.operation);
@@ -4568,6 +4585,9 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     updateController?.stopPeriodicChecks?.();
     autoInstaller?.stop();
     backendBundles?.stopWatching();
+    // The SSH hosts page's terminal is closed while AO still answers (a keep-bridge or installer quit
+    // too): stopping AO first would leave its session for the next run to reap.
+    await step("ssh-terminals", () => sshConnectionsService?.closeAll("quit"), 10_000);
     await step("agent-orchestrator", () => agentOrchestratorUpstream?.stop(), 20_000);
     // Chat hosts outlive AO so a restart can reattach them; a quit ends them, and their agents.
     if (!keepBridge) await step("chat-hosts", () => agentOrchestratorUpstream?.endChatHosts(), 20_000);
@@ -5157,6 +5177,7 @@ async function start() {
     const { createAgentOrchestratorUpstream } = backendBundles.requireModule(backend, "agent-orchestrator-upstream.cjs");
     const { createChangePulse, createRunChangeFilter } = backendBundles.requireModule(backend, "ao-session-events.cjs");
     const { createAgentOrchestratorWorkflow, resolveAoNativeConnection, aoWebCatalogForModel, findInstalledCodexExecutable } = backendBundles.requireModule(backend, "agent-orchestrator-workflow.cjs");
+    const { createSshConnections } = backendBundles.requireModule(backend, "ssh-connections.cjs");
     const { HeadlessHost } = backendBundles.requireModule(backend, "headless-host.cjs");
     const aoDataRoot = process.env.CODING_TOOLS_AO_DATA_DIR
       ? path.resolve(process.env.CODING_TOOLS_AO_DATA_DIR)
@@ -5538,6 +5559,9 @@ async function start() {
         getConnection: () => externalServicesController?.cpaConnection(), logger,
       }),
       WebContentsView: taggedWebContentsView("Agent Orchestrator view"), dialog, shell, logger,
+      // The pinned host keys of Connections > SSH hosts (the same path the SSH hosts store below
+      // writes): with it AO's SSH terminal route is on, and AO's ssh checks host keys against it.
+      sshKnownHostsFile: path.join(app.getPath("userData"), "integrations", "ssh-known-hosts"),
     });
     // Push AO changes to the Mission chat instead of making it poll: AO's session feed (a role's
     // message, reasoning or tool call moved) and mission run state, batched per 150 ms.
@@ -5556,9 +5580,34 @@ async function start() {
       return upstreamAtLaunch.start();
     }).catch((error) => logger.warn("ao.surviving_chats_failed", { detail: String(error?.message ?? error).slice(0, 300) }));
     missionWorkflowRuntime?.dispose();
+    // Connections > SSH hosts: the hosts the person approved, each with the host key they confirmed
+    // (ssh-connections.cjs). Only the hosts page changes it or opens a terminal from it, from the
+    // focused window (the coding-tools:apps:call handler); agents never reach it. The store a
+    // backend restart replaces refuses further changes, and this one reads the file only after
+    // that one's last write has landed (`after`).
+    // The upstream made just above, this store's for good: a terminal is closed through the
+    // upstream that opened it (it holds that daemon's token and its own list of SSH terminals),
+    // also once a backend restart has made another.
+    const sshUpstream = agentOrchestratorUpstream;
+    const sshConnections = createSshConnections({
+      file: path.join(app.getPath("userData"), "integrations", "ssh-hosts.json"),
+      // Written whole from the pinned hosts on every change and at start; ssh only reads it.
+      knownHostsFile: path.join(app.getPath("userData"), "integrations", "ssh-known-hosts"),
+      // Each key fetch writes into a throwaway folder here, read once and removed.
+      probeDir: path.join(app.getPath("userData"), "integrations", "ssh-probe"),
+      after: sshConnectionsService?.dispose(),
+      logger,
+      // The in-app terminal to an approved host runs in AO. Closing sends AO's SSH token, which only
+      // this store's own terminals get (the Antigravity CLI page's Close goes without it).
+      openTerminal: (fields) => sshUpstream.harness.openSshTerminal(fields),
+      closeTerminal: (handle) => sshUpstream.harness.closeTerminal(handle, { ssh: true }),
+    });
+    sshConnectionsService = sshConnections;
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
       findCodexExecutable: () => codexCli.executable() || findInstalledCodexExecutable?.() || null,
       nativeGuardianReview,
+      // The only hosts an agent's ssh, scp or sftp command may be reviewed for: pinned ones.
+      sshApprovedHosts: () => sshConnections.approvedHosts(),
       handoffRedactionEnabled: () => stateStore.read().chatAgentRedactSecrets === true,
       // Stop agents that sat idle for a while; their chats resume them on the next message.
       releaseIdleAgents: true,
@@ -5663,6 +5712,7 @@ async function start() {
         agentOrchestrator: (operation, args) => agentOrchestratorWorkflow.call(operation, args),
         agentOrchestratorUpstream: (operation, args) => agentOrchestratorUpstream.call(operation, args),
         antigravityCli: antigravityCall,
+        sshConnections: (operation, args) => sshConnections.call(operation, args),
         start: (id) => externalServicesController.start(id),
         stop: (id) => externalServicesController.stop(id),
         restart: (id) => externalServicesController.restart(id),
@@ -5749,6 +5799,9 @@ async function start() {
     activeAoWorkflow = null;
     antigravityReauth?.stop();
     antigravityAuthBrowser?.closeAll();
+    // Before the upstream that opened it stops: the SSH hosts store that replaces this one cannot
+    // close its terminal (closeAll never throws).
+    await sshConnectionsService?.closeAll("backend_restart");
     await agentOrchestratorUpstream?.stop().catch((error) => {
       logger.warn("backend.ao_stop_failed", { message: error instanceof Error ? error.message : String(error) });
     });
