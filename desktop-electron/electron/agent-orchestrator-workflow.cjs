@@ -4769,9 +4769,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (GOAL_TOOLS.has(short)) return "This chat's own goal, as Codex's goal tools set it; it runs nothing";
     const group = groupOf(short);
     if (!group || reviewedTool(short)) return null;
-    if (group === "preview") return "The chat's own preview browser: pages on this machine only, each new address allowed by you";
+    // preview_open, which reaches a new address, is a reviewed tool (reviewedTool) and never gets here.
+    if (group === "preview") return "The chat's own preview browser: pages on this machine only, only addresses this chat already opened";
     // subagent_start carries the whole brief, longer than a review reads: it waited for the person.
-    if (group === "subagents") return "One of your own subagents (Runtime > Subagents), which runs under the same safety rules";
+    // What a subagent may then do is capped at this chat's own mode (subagents.cjs start).
+    if (group === "subagents") return "One of your own subagents (Runtime > Subagents), never in a wider mode than this chat; the hard safety rules check its requests";
     // Read-only; another project's chats still need the person's own yes in the app (chat-agent-tools.cjs).
     if (group === "chats") return "Reads the app's chats, read-only; other projects' chats only after you allow them";
     // The chat's own follow-up timer: it sends this chat a note later, and runs nothing.

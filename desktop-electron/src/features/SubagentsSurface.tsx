@@ -365,7 +365,7 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
         <Row label="Permissions">
           <select className="sa-select" aria-label="Permissions" value={settings.permission} onChange={event => setSettings({ permission: event.target.value as SubagentSettings["permission"] })}>
             <option value="auto">Approve for me</option>
-            <option value="full">Full access</option>
+            <option value="full">Full access (when the chat runs in Full access)</option>
           </select>
         </Row>
         <Row label="Release agents when done">

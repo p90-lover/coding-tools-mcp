@@ -633,11 +633,13 @@ const LOCAL_TOOL_NAMES = new Set([
 ]);
 /**
  * Whether "Approve for me" leaves a call of this tool to the chat's reviewer: the calls this app
- * itself confirms when nothing reviewed them upstream (a command, typed input, the screen). Every
- * other tool the app serves is answered as routine, a tool added later included, so a new tool no
- * longer asks the person until someone lists it for the reviewer as well.
+ * itself confirms when nothing reviewed them upstream (a command, typed input, the screen, a new
+ * preview address). Every other tool the app serves is answered as routine, a tool added later
+ * included, so a new tool no longer asks the person until someone lists it for the reviewer as well.
+ * preview_open is reviewed because permitOrigin trusts that review for its address: answered as
+ * routine, the address would be checked by nobody.
  */
-const reviewedTool = (name) => name === "exec_command" || name === "write_stdin" || name === "monitor"
+const reviewedTool = (name) => name === "exec_command" || name === "write_stdin" || name === "monitor" || name === "preview_open"
   || (DESKTOP_TOOLS.has(name) && !UNREVIEWED_DESKTOP.has(name));
 // The app's own chat_list / chat_read (chat-history.cjs): another project's chats need the user's
 // yes, once per project per chat; a dialog names at most this many projects.
@@ -2150,8 +2152,10 @@ function createChatAgentTools({
       return ask("A chat agent wants to type into a running command",
         dialogText([...who(entry), "Worktree: ", { value: root.path, own: true }, "\n", ...describeCall(name, args, root), "\n\nSend it once?"]),
         "The user declined this input; it was not sent.", tooLongToShow(name),
-        // Answered for the user only for a command this session started itself.
-        { auto: entry.autoReview === true && entry.commands.has(commandIdOf(name, args)) && !blockedCommand(args.chars), entry, tool: name, signal });
+        // Answered for the user only for a command this session started itself; the person's own
+        // terminal (user) is in the same list but never the agent's.
+        { auto: entry.autoReview === true && entry.commands.has(commandIdOf(name, args))
+          && entry.commands.get(commandIdOf(name, args))?.user !== true && !blockedCommand(args.chars), entry, tool: name, signal });
     }
     return false;
   }
@@ -2645,7 +2649,9 @@ function createChatAgentTools({
         return failedCall("This chat's session has ended; its tools are no longer available.");
       }
       const stopped = unavailable(entry, name, signal);
-      return stopped || subagents.call(entry.aoSession, entry.workspaceId, name, withoutConsent(given));
+      // The chat's own mode caps its subagents' (subagents.cjs start): only a chat that bypasses
+      // permissions can start one in Full access.
+      return stopped || subagents.call(entry.aoSession, entry.workspaceId, name, withoutConsent(given), { parentBypass: entry.bypass === true });
     }
     // Other chats (chat-history.cjs) are read from the app's own data: no worktree is needed.
     if (group === "chats") {
@@ -2683,6 +2689,14 @@ function createChatAgentTools({
       }
     }
     if (WATCH_TOOLS.has(name)) return commandWatchCall(entry, name, args);
+    // The person's own shell (the side panel's Terminal tab, terminalStart) belongs to the person:
+    // an agent can neither find, read, type into nor stop it. It runs outside Codex's sandbox with
+    // the person's full rights, so one typed line there would escape every terminal check.
+    if (group === "terminal" && name !== "exec_command" && name !== "check_exec_environment"
+      && entry.commands.get(commandIdOf(name, args))?.user === true) {
+      return failedCall("That is the person's own terminal in this chat's side panel; a chat agent cannot read, type into or stop it. Start your own command with exec_command.",
+        { code: "PERSON_TERMINAL", execution_status: "not_started" });
+    }
     if (name === "list_commands") {
       const offset = args.offset ?? 0, limit = args.limit ?? 40;
       if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
@@ -2691,7 +2705,7 @@ function createChatAgentTools({
       if (args.verification_only !== undefined && typeof args.verification_only !== "boolean") return inputError("verification_only must be a boolean");
       if (args.include_verification !== undefined && typeof args.include_verification !== "boolean") return inputError("include_verification must be a boolean");
       const known = [...entry.commands.values()]
-        .filter(command => args.verification_only !== true || command.verification)
+        .filter(command => command.user !== true && (args.verification_only !== true || command.verification))
         .sort((left, right) => right.startedAt - left.startedAt || left.id.localeCompare(right.id));
       const commands = [];
       for (const command of known.slice(offset, offset + limit)) {
@@ -2977,13 +2991,28 @@ function createChatAgentTools({
     const stopped = unavailable(entry, "preview_open", signal);
     if (stopped) return stopped;
     if (entry.origins.has(origin)) return true;
+    // Under "Approve for me" on Claude Code the chat's reviewer already judged this preview_open
+    // (the workflow no longer answers it as routine). Any other "Approve for me" chat asks the
+    // reviewer here; when it cannot decide, or the chat is not on "Approve for me", the person
+    // does. A new address is never opened on a timer.
     const reviewed = reviewedUpstream(entry);
-    const decision = previewOriginDecision({ origin, bypass: entry.bypass, reviewed });
+    let decision = previewOriginDecision({ origin, bypass: entry.bypass, reviewed });
+    let unsure = "";
+    if (decision !== "allow" && entry.autoReview === true && typeof reviewCall === "function" && entry.aoSession) {
+      let verdict = { action: "ask", reason: "" };
+      try {
+        verdict = (await reviewCall({ workspaceId: entry.workspaceId, session: entry.aoSession, tool: "preview_open", args: { url: origin } })) ?? verdict;
+      } catch { /* the person decides */ }
+      if (signal?.aborted) return failedCall("This chat's tool call was cancelled.");
+      if (verdict.action === "allow") decision = "allow";
+      else if (verdict.action === "deny") return failedCall(`The reviewer did not allow this chat to open ${origin}${verdict.reason ? `: ${verdict.reason}` : "."}`);
+      else if (verdict.reason) unsure = ` (${String(verdict.reason).slice(0, 200)})`;
+    }
     if (decision !== "allow") {
       const answer = await ask("A chat agent wants to open a page in its preview",
         dialogText([...who(entry), "Address: ", { value: origin }, "\n\nThe chat's own browser would load this page served on this computer; the\n"
-          + "agent could read it, click and type in it. Allow this address for this chat?"]),
-        `The user did not allow this chat to open ${origin}.`, undefined, { auto: entry.autoReview === true, entry, tool: "preview_open", signal });
+          + `agent could read it, click and type in it.${unsure ? `\nThe reviewer could not decide${unsure}.` : ""} Allow this address for this chat?`]),
+        `The user did not allow this chat to open ${origin}.`, undefined, { entry, tool: "preview_open", signal });
       if (answer !== true) return answer;
     }
     const changed = unavailable(entry, "preview_open", signal);

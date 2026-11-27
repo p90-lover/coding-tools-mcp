@@ -379,10 +379,13 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     if (run.kind === "team") run.released = true;
     if (run.released === true) return Promise.resolve({ ok: true });
     if (!run.releasePromise) {
-      const retained = !ACTIVE.has(run.state);
+      // A session already gone counts as released when that was the point: a retained report can
+      // outlive a session the user removed, and a stop's acknowledged interrupt can end a session
+      // still starting (AO then answers exit with SESSION_TERMINATED or SESSION_NOT_FOUND). Without
+      // the second case such a run stayed "starting" with its slots held until the app restarted.
+      const goneIsReleased = !ACTIVE.has(run.state) || (run.stopping === true && run.stopAcknowledged === true);
       run.releasePromise = Promise.resolve().then(() => harness()?.exitAgent?.(run.id)).catch(error => {
-        // A retained report can outlive a session the user already removed.
-        if (!retained || !/\b(?:SESSION_NOT_FOUND|SESSION_TERMINATED)\b/.test(String(error?.message))) throw error;
+        if (!goneIsReleased || !/\b(?:SESSION_NOT_FOUND|SESSION_TERMINATED)\b/.test(String(error?.message))) throw error;
         return { ok: true };
       }).then(outcome => {
         if (outcome?.ok !== true) throw new Error(`Subagent ${run.id} shutdown is unconfirmed`);
@@ -430,7 +433,11 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
         if (approval.kind === "plan") {
           decision = decisions.find((item) => /acceptEdits/i.test(item.id)) ?? decisions.find((item) => item.kind === "allow_once");
         } else if (Buffer.byteLength(request, "utf8") >= MAX_CHECKED_REQUEST || blockedRequest(approval)
-          || gitPushRequest(approval.command) || gitPushRequest(approval.toolInput)) {
+          || gitPushRequest(approval.command) || gitPushRequest(approval.toolInput)
+          // What AO marks as needing a human, or as beyond what the guard can read (a shell call
+          // that disables the sandbox, runs in the background, or names another directory; a
+          // request cut for length), has nobody to ask here: denied, never allowed unread.
+          || approval.guardianRequiresHuman === true || approval.guardianUnsupported === true || approval.reviewTruncated === true) {
           // Too long to be sure of (AO's upstream cuts a tool's input at 1500 bytes and a command
           // at 4000, so the blocked part may sit past the cut): denied, as "Approve for me" does.
           // This guard-only path has no repository/model verdict. Publication goes through the
@@ -716,10 +723,13 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   }
 
   /** Starts a subagent for the chat session `parent` (an AO session id) in `workspaceId`. */
-  async function start(parent, workspaceId, { agent: wanted, team: wantedTeam, task, ...picks } = {}) {
+  async function start(parent, workspaceId, { agent: wanted, team: wantedTeam, task, ...picks } = {}, { parentBypass = false } = {}) {
     const generation = stopGenerations.get(parent) ?? 0;
-    const { settings } = read();
-    if (!settings.enabled) throw new Error("Subagents are turned off on the Subagents page");
+    const saved = read().settings;
+    if (!saved.enabled) throw new Error("Subagents are turned off on the Subagents page");
+    // A subagent never runs with more than its chat: only a chat that itself bypasses permissions
+    // may start one in "Full access"; any other chat's subagent runs on "Approve for me" rules.
+    const settings = saved.permission === "full" && parentBypass !== true ? { ...saved, permission: "auto" } : saved;
     const brief = text(task, MAX_TASK);
     if (!brief) throw new Error("Give the subagent a task");
     if (wantedTeam !== undefined && wantedTeam !== null) {
@@ -783,9 +793,11 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     const permissions = settings.permission === "full"
       ? { permission_profile: ":danger-full-access", approval_policy: "never", approvals_reviewer: "user" }
       : { permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
-    // AO honours an explicit permission mode only on Claude Code and Codex; opencode keeps its own.
-    const explicit = ["ao:claude-code", "ao:codex"].includes(route.harness_id);
-    const args = launchArgs(workspaceId, { ...route, ...(explicit ? permissions : {}) }, `Subagent · ${agent.name}`);
+    // Every subagent gets the page's mode. Claude Code, Codex, opencode, Pi and Antigravity honour
+    // it (the workflow's PERMISSION_AGENTS); for an agent that runs only in Full access, launchArgs
+    // refuses "Approve for me" with its reason instead of starting it in that agent's own default,
+    // which for opencode allowed every tool unasked.
+    const args = launchArgs(workspaceId, { ...route, ...permissions }, `Subagent · ${agent.name}`);
     const prompt = [agent.instructions, SUBAGENT_NOTE, REPORT_NOTE, `Task:\n${brief}`].filter(Boolean).join("\n\n");
     const service = harness();
     if (!service) throw new Error("Agent Orchestrator is not running");
@@ -1032,7 +1044,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   }
 
   /** One subagent tool call from the chat session `parent` (an AO session id) in `workspaceId`. */
-  async function call(parent, workspaceId, name, args = {}) {
+  async function call(parent, workspaceId, name, args = {}, { parentBypass = false } = {}) {
     if (!parent) return failure("This chat's session is not ready yet; try again in a moment.");
     try {
       switch (name) {
@@ -1050,7 +1062,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
         case "subagent_models": return textResult(await modelList(workspaceId));
         case "subagent_start": {
           const run = await start(parent, workspaceId, { agent: args.agent, team: args.team, task: args.task,
-            model: args.model, effort: args.effort, context_window: args.context_window });
+            model: args.model, effort: args.effort, context_window: args.context_window }, { parentBypass });
           if (Number.isSafeInteger(args.wait_seconds) && args.wait_seconds > 0) await waitFor(run, args.wait_seconds);
           return textResult(view(run));
         }
