@@ -89,7 +89,8 @@ test("host window installs the private CPA panel session on its webContents", ()
   assert.ok(createWindow);
   const installed = [];
   const watched = [];
-  const contents = { on() {}, setWindowOpenHandler() {} };
+  // once: the window closes the SSH hosts page's terminal when its webContents is destroyed.
+  const contents = { on() {}, once() {}, setWindowOpenHandler() {} };
   class Window {
     webContents = contents;
     setMenuBarVisibility() {}
