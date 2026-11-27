@@ -109,8 +109,10 @@ function redactHandoffCredentials(text) {
     .replace(/(\b[a-z][a-z0-9+.-]{0,31}:\/\/)[^\s:/?#"'`<>@]+:[^\s/?#"'`<>@]+@/gi, `$1${marker}@`)
     .replace(/([?&](?:api[_-]?key|access_token|refresh_token|client_secret|token|password)=)[^&\s#"'`<>\[]+/gi, `$1${marker}`)
     .replace(/(\bBearer[ \t]+|\bAuthorization[ \t]*:[ \t]*Basic[ \t]+)[A-Za-z0-9._~+/-]{12,}=*/gi, `$1${marker}`)
-    .replace(/\b(?:mstrl_[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[A-Za-z0-9_-]{35})(?![A-Za-z0-9_-])/g, marker)
-    .replace(/(\b(?:api[ _-]?key|access[ _-]?token|refresh[ _-]?token|client[ _-]?secret|password|passphrase)["']?[ \t]*[:=][ \t]*)(?:"[^"\r\n]+"|'[^'\r\n]+'|[A-Za-z0-9][^\s"'`,;}\]]{5,})/gi, `$1${marker}`);
+    .replace(/\b(?:mstrl_[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{16,}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36}|hf_[A-Za-z0-9]{30,}|(?:AKIA|ASIA)[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|xapp-[A-Za-z0-9-]{20,}|AIza[A-Za-z0-9_-]{35}|ya29\.[A-Za-z0-9_-]{20,}|GOCSPX-[A-Za-z0-9_-]{20,}|eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})(?![A-Za-z0-9_-])/g, marker)
+    // A name with an env-style prefix counts too (DB_PASSWORD, AWS_SECRET_ACCESS_KEY, GITHUB_TOKEN):
+    // `\b` never matched after "_", so a pasted .env kept every value.
+    .replace(/((?<![A-Za-z0-9])(?:[A-Za-z0-9]+[_.-])*(?:api[ _-]?key|access[ _-]?(?:token|key)|refresh[ _-]?token|client[ _-]?secret|secret(?:[ _-]?(?:access[ _-]?)?key)?|private[ _-]?key|password|passwd|passphrase|token)["']?[ \t]*[:=][ \t]*)(?:"[^"\r\n]+"|'[^'\r\n]+'|[A-Za-z0-9][^\s"'`,;}\]]{5,})/gi, `$1${marker}`);
 }
 
 module.exports = {

@@ -64,7 +64,15 @@ const { PREVIEW_TOOL_DEFS, PREVIEW_TOOLS, visualizeReference, visualizeFragmentE
 const { SUBAGENT_TOOL_DEFS, SUBAGENT_TOOLS } = require("./subagents.cjs");
 const { CHAT_HISTORY_TOOL_DEFS, CHAT_HISTORY_TOOLS } = require("./chat-history.cjs");
 const { IMAGE_TOOL_DEFS } = require("./chat-images.cjs");
-const { MAX_SECRET, MAX_SECRETS } = require("./chat-redaction.cjs");
+const { MAX_SECRET, MAX_SECRETS, redactHandoffCredentials } = require("./chat-redaction.cjs");
+
+/** Every string in a tool result with credential shapes hidden (redactHandoffCredentials). */
+function credentialsHidden(value, depth = 0) {
+  if (typeof value === "string") return redactHandoffCredentials(value);
+  if (!value || typeof value !== "object" || depth > 20) return value;
+  if (Array.isArray(value)) return value.map((item) => credentialsHidden(item, depth + 1));
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, credentialsHidden(item, depth + 1)]));
+}
 const { createCommandWatches, WATCH_TOOL_DEFS, WATCH_TOOLS } = require("./chat-command-watches.cjs");
 const { createCommandMonitors, monitorTimeout, MONITOR_TOOL_DEFS, MONITOR_TOOLS } = require("./chat-command-monitors.cjs");
 const { GUIDE_TOOL_DEFS, createComputerGuides } = require("./computer-guides.cjs");
@@ -505,6 +513,7 @@ const CONFIRMED_TOOLS = new Map([
   ["computer_wait", "wait for a control in the window it controls"],
   ["computer_action", "click or type in the window it controls"],
   ["computer_sequence", "click or type in the window it controls"],
+  ["view_app", "see the Coding Tools window, with whatever chat or page it shows now"],
 ]);
 // Desktop calls that see and touch nothing: control's state, stopping it, headless's advice on
 // which tool fits, and whether vision is available. Every other desktop call is reviewed.
@@ -639,7 +648,7 @@ const LOCAL_TOOL_NAMES = new Set([
  * preview_open is reviewed because permitOrigin trusts that review for its address: answered as
  * routine, the address would be checked by nobody.
  */
-const reviewedTool = (name) => name === "exec_command" || name === "write_stdin" || name === "monitor" || name === "preview_open"
+const reviewedTool = (name) => name === "exec_command" || name === "write_stdin" || name === "monitor" || name === "preview_open" || name === "view_app"
   || (DESKTOP_TOOLS.has(name) && !UNREVIEWED_DESKTOP.has(name));
 // The app's own chat_list / chat_read (chat-history.cjs): another project's chats need the user's
 // yes, once per project per chat; a dialog names at most this many projects.
@@ -2461,8 +2470,10 @@ function createChatAgentTools({
    */
   async function permitProjects(entry, projects, tool, signal) {
     const pending = projects.filter((project) => !entry.chatProjects.has(project.id));
-    if (!pending.length || entry.bypass) return true;
+    if (!pending.length) return true;
+    // Before the bypass check: a Full-access subagent is still a subagent nobody watches.
     if (entry.subagent) return failedCall("A subagent reads only its own project's chats; ask the main chat to read other projects.");
+    if (entry.bypass) return true;
     const names = pending.slice(0, MAX_ASKED_PROJECTS).flatMap((project) => ["\n- ", { value: project.name, own: true }]);
     const more = pending.length > MAX_ASKED_PROJECTS ? [`\n- and ${pending.length - MAX_ASKED_PROJECTS} more`] : [];
     const answer = await ask(`A chat agent wants to read chats in ${pending.length === 1 ? "another project" : "other projects"}`,
@@ -2628,7 +2639,12 @@ function createChatAgentTools({
     if (name === "push_notification") return pushNotification(entry, given);
     if (name === "sleep") return sleepCall(entry, given, signal, channel);
     if (name === "app_processes") return listProcesses(given);
-    if (name === "view_app") return viewApp(given);
+    if (name === "view_app") {
+      // The app's window can show another project's chat or Settings, which chat_read would need
+      // the person's yes for, so it is reviewed like a screen capture (reviewDesktop).
+      const verdict = await reviewDesktop(entry, name, given, signal);
+      return verdict === true ? viewApp(given) : verdict;
+    }
     if (name === "computer_guide") {
       if ((given.app !== undefined && typeof given.app !== "string") || (given.topic !== undefined && typeof given.topic !== "string")) {
         return inputError("topic and app must be strings; nothing was read.");
@@ -2661,8 +2677,12 @@ function createChatAgentTools({
         return failedCall("This chat's session has ended; its tools are no longer available.");
       }
       const stopped = unavailable(entry, name, signal);
-      return stopped || chatHistory.call({ session: entry.aoSession, workspaceId: entry.workspaceId, name, args: withoutConsent(given),
+      if (stopped) return stopped;
+      const read = await chatHistory.call({ session: entry.aoSession, workspaceId: entry.workspaceId, name, args: withoutConsent(given),
         permit: (projects) => permitProjects(entry, projects, name, signal) });
+      // Another chat's messages, answers and errors can hold a key someone pasted there. With
+      // "Hide secrets" on, credential shapes are hidden here as they are in handoffs.
+      return redaction && setting(redaction.enabled) ? credentialsHidden(read) : read;
     }
     // A monitor's command is started through this same callTool as exec_command, below.
     if (MONITOR_TOOLS.has(name)) return monitorCall(entry, name, given, channel);

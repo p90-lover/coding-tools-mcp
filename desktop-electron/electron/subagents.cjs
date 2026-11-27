@@ -276,8 +276,11 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     runsQueued = true;
     runsSaving = runsSaving.catch(() => {}).then(async () => {
       runsQueued = false;
+      // Every active run is kept, whatever its age: one left out would be forgotten after a
+      // restart while its AO session runs on, unsupervised. Recent ended runs fill the rest.
       const kept = [...runs.values()].filter((run) => ACTIVE.has(run.state) || now() - (run.endedAt ?? run.startedAt) < KEEP_ENDED_MS)
-        .sort((a, b) => b.startedAt - a.startedAt).slice(0, MAX_SAVED_RUNS)
+        .sort((a, b) => Number(ACTIVE.has(b.state)) - Number(ACTIVE.has(a.state)) || b.startedAt - a.startedAt)
+        .slice(0, Math.max(MAX_SAVED_RUNS, [...runs.values()].filter((run) => ACTIVE.has(run.state)).length))
         .map((run) => Object.fromEntries(SAVED_FIELDS.filter((key) => run[key] !== undefined).map((key) => [key, run[key]])));
       await writeWhole(runsPath, { version: 1, runs: kept });
     }).catch((error) => logger?.warn?.("subagents.runs_save_failed", { message: String(error?.message ?? error).slice(0, 200) }));
@@ -869,6 +872,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     run.stopping = true;
     run.stopPromise = Promise.resolve().then(async () => {
       const service = harness();
+      let finishedReport = null;
       if (active && run.kind === "team") {
         // The workflow's mission Stop: no more work starts and its owned agents are interrupted.
         const owner = teams();
@@ -888,9 +892,15 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
         }
         const observed = await service.observe(run.id);
         if (!settled(observed)) throw new Error("Stop requested; the subagent is still working or its settlement is unconfirmed");
+        // A turn that finished before the stop took hold (just inside the time limit, or since the
+        // last poll) keeps its report: it is completed, not stopped or timed out.
+        if (observed?.turnState === "completed" && (!run.turnId || !observed.turnId || observed.turnId === run.turnId)) {
+          finishedReport = String(observed.answer || "").slice(0, MAX_REPORT) || "(The subagent finished without a written report.)";
+        }
       }
       await release(run);
-      if (ACTIVE.has(run.state)) finish(run, run.stopState ?? "stopped", { ...(run.stopState ? {} : { error: "" }), released: true });
+      if (ACTIVE.has(run.state) && finishedReport !== null) finish(run, "completed", { report: finishedReport, error: "", released: true });
+      else if (ACTIVE.has(run.state)) finish(run, run.stopState ?? "stopped", { ...(run.stopState ? {} : { error: "" }), released: true });
       else run.stopping = false;
       return run;
     }).catch(error => {

@@ -104,6 +104,20 @@ test("stopping a subagent still starting releases it when the interrupt already 
   } finally { w.cleanup(); }
 });
 
+test("a stop that lands after the subagent's turn finished keeps its report, as completed", async () => {
+  const w = world();
+  try {
+    const { subagent_id: id } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read one" }));
+    // The turn finished since the last poll (or just inside the time limit); an interrupt does not undo it.
+    w.sessions.set(id, { turnState: "completed", status: "ready", answer: "Found it in src/a.ts", approvals: [] });
+    w.harness.interrupt = async (sid) => { w.interrupted.push(sid); };
+    assert.equal((await w.service.call("chat-1", "ws-1", "subagent_stop", { subagent_id: id })).isError, false);
+    const [run] = w.service.runs();
+    assert.equal(run.state, "completed");
+    assert.equal(run.report, "Found it in src/a.ts");
+  } finally { w.cleanup(); }
+});
+
 test("a parent stop waits for its pending launch and ends the returned child", async () => {
   const w = world({ settings: { releaseWhenDone: false } });
   let finishLaunch, spawnCalled;
