@@ -1402,6 +1402,35 @@ function rendererCallback(file, name, globals) {
 }
 const delayedReply = () => { let resolve, reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; };
 
+test("the workspace runs refresh applies an empty queue after background delivery", async () => {
+  let refresh, reply;
+  const seen = [], noop = () => {};
+  const start = rendererCallback("AgentOrchestratorSurface.tsx", "effect:const timer = setInterval(refresh, 5000);", {
+    workspaceId: "fixture-workspace", surfaceHidden: () => false,
+    setInterval: (fn) => { refresh = fn; return 1; }, clearInterval: noop, onAoPush: () => noop,
+    moduleCall: (operation) => { assert.equal(operation, "runs"); return reply.promise; },
+    syncChatQueues: (...args) => seen.push(plain(args)),
+    boardWorkspace: { current: "fixture-workspace" }, setLoadedWorkspace: noop,
+    setMissions: noop, setGoals: noop, setWakeups: noop, setLoops: noop, setSchedules: noop,
+    setTeam: noop, setSavedTeams: noop, setTaskLifecycle: noop,
+    chatGoals: () => [], chatWakeups: () => [], chatLoops: () => [], chatSchedules: () => [], aoSavedTeams: () => [],
+  });
+  const stop = start();
+  const read = async (result) => {
+    reply = delayedReply(); refresh(); reply.resolve(result); await new Promise(setImmediate);
+  };
+  const pending = { task: [{ id: "queued-1", message: "next message", what: "Message" }] };
+  await read({ runs: [], queues: pending });
+  await read({ runs: [] });
+  await read({ runs: [], queues: [] });
+  await read({ runs: [], queues: {} });
+  assert.deepEqual(seen, [["fixture-workspace", pending], ["fixture-workspace", {}]]);
+
+  reply = delayedReply(); refresh(); stop(); reply.resolve({ runs: [], queues: pending });
+  await new Promise(setImmediate);
+  assert.equal(seen.length, 2, "a refresh that outlives the workspace cannot restore its old queue");
+});
+
 for (const changedWhileSaving of [false, true]) test(`markup replacement preserves eight attachments${changedWhileSaving ? " after another attachment changes during saving" : ""}`, async () => {
   const initial = Array.from({ length: 8 }, (_, index) => ({ name: `image-${index}.png`, path: `G:/fixtures/image-${index}.png`, image: true, preview: `blob:image-${index}` }));
   const source = initial[3], saved = delayedReply(), updates = [], saves = [];

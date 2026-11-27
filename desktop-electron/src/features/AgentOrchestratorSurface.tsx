@@ -1341,6 +1341,10 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
         if (live && Array.isArray(current.runs)) {
           // What did not change keeps its object, so a refresh that found nothing new redraws nothing.
           setMissions((previous) => keepRevisions(previous, current.runs as AoMission[]));
+          // The app can deliver a queued message without a composer action. An empty snapshot clears its last row.
+          if (current.queues && typeof current.queues === "object" && !Array.isArray(current.queues)) {
+            syncChatQueues(workspaceId, current.queues as Record<string, QueuedChatMessage[]>);
+          }
           // A switch whose own runs read failed is loaded once a refresh lands with the board there.
           if (boardWorkspace.current === workspaceId) setLoadedWorkspace(workspaceId);
           const goals = chatGoals(current), team = current.team as AoTeam | null ?? null, saved = aoSavedTeams(current);

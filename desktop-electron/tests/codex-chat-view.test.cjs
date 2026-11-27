@@ -166,6 +166,7 @@ function mount(props, { effects = false, objectUrls, responseEvents } = {}) {
       throw new Error("chat hooks did not settle");
     },
     needsRender: () => dirty,
+    queueSnapshot: module.syncChatQueues,
     unmount: () => { for (const cleanup of cleanups) cleanup(); cleanups.clear(); },
     // The queued-message bar alone, for a queue the chat itself rarely builds (two separate messages).
     bar: (barProps) => { frame = "bar"; cursor = 0; seen = {}; return module.QueuedMessageBar(barProps); },
@@ -989,6 +990,28 @@ test("a queued message waits in Claude Code's queued bar: 1 message queued, its 
   action("Remove from queue").props.onClick();
   assert.equal(all().some((element) => element.props?.["aria-label"] === "Queued messages"), false, "an empty queue shows no bar");
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0);
+});
+
+test("a queue snapshot drops sent rows and the empty box without clearing another project", () => {
+  const { props } = base({ selectedTaskId: "first-chat", projectId: "first-project" });
+  const view = mount(props, { effects: true });
+  const band = (next) => walk(view.render(next)).find((element) => element.props?.className === "cx-queued");
+  const sent = { id: "sent", what: "Message", message: "already sent", sending: 42 };
+  const waiting = { id: "next", what: "Message", message: "still waiting", note: "retry later" };
+  const other = { id: "unrelated", what: "Message", message: "another project's message" };
+
+  view.queueSnapshot("first-project", { "first-chat": [sent, waiting] });
+  view.queueSnapshot("second-project", { "second-chat": [other] });
+  assert.ok(band(), "a sending item and the next one still have a queue box");
+  view.queueSnapshot("first-project", { "first-chat": [{ ...sent }, { ...waiting }] });
+  assert.equal(view.needsRender(), false, "an unchanged poll does not redraw the chat");
+  view.queueSnapshot("first-project", { "first-chat": [waiting] });
+  assert.match(text(band()), /still waiting/);
+  assert.match(text(band()), /retry later/);
+  view.queueSnapshot("first-project", {});
+  assert.equal(band(), undefined, "the last successful delivery removes the whole queue box");
+  assert.match(text(band({ selectedTaskId: "second-chat", projectId: "second-project" })), /another project's message/);
+  view.unmount();
 });
 
 test("a steer on its way stays in the chat while a message waiting for the next turn is in the queued bar", async () => {
