@@ -14,7 +14,7 @@ const PASS = "pa@ss:word";
 
 // Provider network: every Chromium session goes through the app's egress router (egress-router.cjs),
 // which signs in to the proxy itself; the sessions never see a proxy or its sign-in.
-function world(t, { startRouter } = {}) {
+function world(t, { startRouter, getCpaConnection, fetchImpl = async () => ({ json: async () => ({ files: [] }), ok: true, status: 200 }) } = {}) {
   const directory = path.join(root, "aiTemp/proxy-routing-controller", crypto.randomUUID());
   fs.mkdirSync(directory, { recursive: true });
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -31,7 +31,7 @@ function world(t, { startRouter } = {}) {
     safeStorage: { isEncryptionAvailable: () => false },
     session: { defaultSession: sessionFor("default"), fromPartition: sessionFor },
     shell: {}, userData: directory,
-    fetchImpl: async () => ({ ok: true, status: 200, text: async () => "[]", json: async () => ({}) }),
+    fetchImpl, getCpaConnection,
     ...(startRouter ? { startRouter } : {}),
   });
   return { controller, sessionFor, warnings };
@@ -101,6 +101,74 @@ test("a proxy without a sign-in is still reached through the router; a router th
   await broken.controller.applyGlobalRouting();
   assert.match(broken.sessionFor("default").proxy.proxyRules, /^http:\/\/127\.0\.0\.1:\d+$/, "never the proxy itself, never direct: the routed session fails until the router runs");
   assert.ok(broken.warnings.some(([event]) => event === "proxy.router_failed"));
+});
+
+test("CPA retries a failed route write without rewriting confirmed or virtual credentials", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 120_000 });
+  const stable = { name: "stable.json", provider: "claude" };
+  const pending = { name: "pending.json", provider: "codex" };
+  const virtual = { name: "virtual", provider: "provider-manager" };
+  let files = [stable, pending, virtual];
+  const writes = [];
+  const router = fakeRouter();
+  const { controller, warnings } = world(t, {
+    startRouter: router.start,
+    getCpaConnection: () => ({ managementKey: "fixture-key" }),
+    fetchImpl: async (url, { method, body }) => {
+      if (method === "GET") return Response.json({ files });
+      assert.equal(new URL(url).pathname, "/v0/management/auth-files/fields");
+      const { name, proxy_url } = JSON.parse(body);
+      writes.push(name);
+      if (name === pending.name && writes.filter((value) => value === name).length === 1) {
+        return Response.json({ error: `CPA was temporarily unable to save ${proxy_url}` }, { status: 503 });
+      }
+      if (name === virtual.name) {
+        return Response.json({ error: "plugin virtual auth cannot be modified directly; edit or delete the source auth file" }, { status: 409 });
+      }
+      return Response.json({ status: "ok" });
+    },
+  });
+  await controller.applyGlobalRouting();
+  await controller.egressStatus();
+  assert.deepEqual(writes, [stable.name, pending.name, virtual.name]);
+
+  t.mock.timers.tick(120_000);
+  await controller.egressStatus();
+  assert.deepEqual(writes.slice(3), [pending.name]);
+  assert.doesNotMatch(JSON.stringify(warnings), /@127\.0\.0\.1/, "warnings never include the router's sign-in");
+
+  files = null;
+  t.mock.timers.tick(120_000);
+  const beforeRemoval = await controller.egressStatus();
+  assert.equal(beforeRemoval.credentials.length, 3, "an invalid response does not erase the last inventory");
+  files = [pending, virtual];
+  t.mock.timers.tick(120_000);
+  await controller.egressStatus();
+  assert.equal(writes.length, 4, "the successful retry is remembered");
+  files = [stable, pending, virtual];
+  t.mock.timers.tick(120_000);
+  await controller.egressStatus();
+  assert.deepEqual(writes.slice(4), [stable.name], "an account removed and added under the same name needs a new stamp");
+});
+
+test("CPA stops credential writes after an authorization refusal", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 120_000 });
+  const calls = [];
+  const router = fakeRouter();
+  const { controller } = world(t, {
+    startRouter: router.start,
+    getCpaConnection: () => ({ managementKey: "fixture-key" }),
+    fetchImpl: async (_url, { method }) => {
+      calls.push(method);
+      if (method === "GET") return Response.json({ files: [{ name: "first.json" }, { name: "second.json" }] });
+      return Response.json({ error: "Unauthorized" }, { status: 401 });
+    },
+  });
+  await controller.applyGlobalRouting();
+  await controller.egressStatus();
+  t.mock.timers.tick(120_000);
+  await controller.egressStatus();
+  assert.deepEqual(calls, ["GET", "PATCH"], "no second credential or follow-up request during CPA's lockout window");
 });
 
 test("a refused sign-in is logged at most once a minute, naming no secret", async (t) => {

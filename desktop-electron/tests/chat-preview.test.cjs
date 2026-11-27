@@ -737,7 +737,7 @@ function post(url, body, headers) {
   });
 }
 
-function server({ confirm = async () => true, preview = () => true, results = {}, runGh = null } = {}) {
+function server({ confirm = async () => true, preview = () => true, results = {}, runGh = null, reviewCall = null } = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "chat-preview-"));
   const root = path.join(base, "worktrees", "p1");
   fs.mkdirSync(root, { recursive: true });
@@ -758,7 +758,7 @@ function server({ confirm = async () => true, preview = () => true, results = {}
   const headless = [];
   const confirmations = [];
   const tools = createChatAgentTools({
-    previews: fakePreviews, previewEnabled: preview, terminalEnabled: () => true, minAnswerMs: 0, logger: { info() {}, warn() {} }, runGh,
+    previews: fakePreviews, previewEnabled: preview, terminalEnabled: () => true, minAnswerMs: 0, logger: { info() {}, warn() {} }, runGh, reviewCall,
     confirm: async (request) => { confirmations.push(request); return confirm(request); },
     sessionWorkspace: async () => ({ root }),
     requestHeadless: async (endpoint, body) => {
@@ -825,6 +825,43 @@ test("a session whose calls are already reviewed (Approve for me) or that bypass
   await plain.call("preview_open", { url: "http://localhost:7000/" });
   assert.equal(env.confirmations.length, 1, "an unreviewed session still asks");
   assert.equal(previewOriginDecision({ origin: "http://localhost:1", bypass: false, servedHere: true }), "ask", "a printed address alone is not enough");
+});
+
+test("on Approve for me, a chat whose calls nothing reviewed upstream asks the reviewer for a new address, then the person, never a timer", async (t) => {
+  const verdicts = { "http://localhost:4000": { action: "allow" }, "http://localhost:4001": { action: "deny", reason: "an admin page" },
+    "http://localhost:4002": { action: "ask", reason: "unknown service" } };
+  const reviewed = [];
+  const env = server({ reviewCall: async (request) => { reviewed.push(request); return verdicts[request.args.url]; } });
+  t.after(env.cleanup);
+  const codex = await leased(env.tools, { agent: "codex", approvalMode: "accept-edits", autoReview: true });
+  assert.equal((await codex.call("preview_open", { url: "http://localhost:4000/" })).isError, false);
+  assert.equal(env.confirmations.length, 0, "the reviewer allowed it");
+  assert.deepEqual(reviewed.map((request) => [request.tool, request.args.url, request.session]), [["preview_open", "http://localhost:4000", "ao-1"]]);
+  const denied = await codex.call("preview_open", { url: "http://localhost:4001/" });
+  assert.equal(denied.isError, true);
+  assert.match(denied.content[0].text, /reviewer did not allow.*an admin page/);
+  assert.equal(env.confirmations.length, 0, "a denial is final");
+  await codex.call("preview_open", { url: "http://localhost:4002/" });
+  assert.equal(env.confirmations.length, 1, "an unsure reviewer leaves it to the person");
+  assert.match(env.confirmations[0].detail, /reviewer could not decide \(unknown service\)/);
+});
+
+test("an agent can neither find, read, type into nor stop the person's own terminal", async (t) => {
+  const env = server({ results: { exec_command: () => ({ ok: true, command_id: "shell-1", status: "running" }) } });
+  t.after(env.cleanup);
+  const agent = await leased(env.tools, { agent: "codex", approvalMode: "accept-edits", autoReview: true });
+  assert.equal((await env.tools.terminalStart({ sessionId: "ao-1" })).commandId, "shell-1");
+  const sent = env.headless.length;
+  const listed = await agent.call("list_commands");
+  assert.deepEqual(listed.structuredContent?.commands ?? JSON.parse(listed.content[0].text).commands, [], "not listed for the agent");
+  for (const [name, args] of [["write_stdin", { session_id: "shell-1", chars: "Remove-Item -Recurse ~\r" }],
+    ["read_output", { output_ref: "command:shell-1:stdout" }], ["kill_command", { command_id: "shell-1" }]]) {
+    const refused = await agent.call(name, args);
+    assert.equal(refused.isError, true, name);
+    assert.match(refused.content[0].text, /person's own terminal/, name);
+  }
+  assert.equal(env.headless.length, sent, "nothing reached the shell");
+  assert.equal(env.confirmations.length, 0, "and nobody was asked to approve it");
 });
 
 test("the tools server closes each connection after answering, so an agent never reuses one Node has dropped", async (t) => {

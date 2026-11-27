@@ -64,7 +64,15 @@ const { PREVIEW_TOOL_DEFS, PREVIEW_TOOLS, visualizeReference, visualizeFragmentE
 const { SUBAGENT_TOOL_DEFS, SUBAGENT_TOOLS } = require("./subagents.cjs");
 const { CHAT_HISTORY_TOOL_DEFS, CHAT_HISTORY_TOOLS } = require("./chat-history.cjs");
 const { IMAGE_TOOL_DEFS } = require("./chat-images.cjs");
-const { MAX_SECRET, MAX_SECRETS } = require("./chat-redaction.cjs");
+const { MAX_SECRET, MAX_SECRETS, redactHandoffCredentials } = require("./chat-redaction.cjs");
+
+/** Every string in a tool result with credential shapes hidden (redactHandoffCredentials). */
+function credentialsHidden(value, depth = 0) {
+  if (typeof value === "string") return redactHandoffCredentials(value);
+  if (!value || typeof value !== "object" || depth > 20) return value;
+  if (Array.isArray(value)) return value.map((item) => credentialsHidden(item, depth + 1));
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, credentialsHidden(item, depth + 1)]));
+}
 const { createCommandWatches, WATCH_TOOL_DEFS, WATCH_TOOLS } = require("./chat-command-watches.cjs");
 const { createCommandMonitors, monitorTimeout, MONITOR_TOOL_DEFS, MONITOR_TOOLS } = require("./chat-command-monitors.cjs");
 const { GUIDE_TOOL_DEFS, createComputerGuides } = require("./computer-guides.cjs");
@@ -505,6 +513,7 @@ const CONFIRMED_TOOLS = new Map([
   ["computer_wait", "wait for a control in the window it controls"],
   ["computer_action", "click or type in the window it controls"],
   ["computer_sequence", "click or type in the window it controls"],
+  ["view_app", "see the Coding Tools window, with whatever chat or page it shows now"],
 ]);
 // Desktop calls that see and touch nothing: control's state, stopping it, headless's advice on
 // which tool fits, and whether vision is available. Every other desktop call is reviewed.
@@ -633,11 +642,13 @@ const LOCAL_TOOL_NAMES = new Set([
 ]);
 /**
  * Whether "Approve for me" leaves a call of this tool to the chat's reviewer: the calls this app
- * itself confirms when nothing reviewed them upstream (a command, typed input, the screen). Every
- * other tool the app serves is answered as routine, a tool added later included, so a new tool no
- * longer asks the person until someone lists it for the reviewer as well.
+ * itself confirms when nothing reviewed them upstream (a command, typed input, the screen, a new
+ * preview address). Every other tool the app serves is answered as routine, a tool added later
+ * included, so a new tool no longer asks the person until someone lists it for the reviewer as well.
+ * preview_open is reviewed because permitOrigin trusts that review for its address: answered as
+ * routine, the address would be checked by nobody.
  */
-const reviewedTool = (name) => name === "exec_command" || name === "write_stdin" || name === "monitor"
+const reviewedTool = (name) => name === "exec_command" || name === "write_stdin" || name === "monitor" || name === "preview_open" || name === "view_app"
   || (DESKTOP_TOOLS.has(name) && !UNREVIEWED_DESKTOP.has(name));
 // The app's own chat_list / chat_read (chat-history.cjs): another project's chats need the user's
 // yes, once per project per chat; a dialog names at most this many projects.
@@ -861,6 +872,20 @@ function windowsQuirk(part, { write = false } = {}) {
 /** The name Windows opens for a path part, lower-cased: `.git.`, `.GIT ` and `.git::$DATA` all open `.git`. */
 const effectiveName = (part) => part.split(":")[0].replace(/[. ]+$/, "").toLowerCase();
 const protectedName = (part) => part !== "." && part !== ".." && PROTECTED_NAMES.has(effectiveName(part));
+/**
+ * Whether path parts (from the worktree root) name a file a chat's own harness reads its
+ * permission rules from. AO starts Claude Code with the project's and local settings, so an
+ * allow rule patched into .claude/settings(.local).json lets the agent's later calls run with no
+ * permission request, while the app still trusts that the reviewer saw them (reviewedUpstream);
+ * opencode's root config and Codex's project config carry the same kind of rules.
+ */
+function harnessPermissionFile(parts) {
+  const names = parts.filter((part) => part && part !== "." && part !== "..").map(effectiveName);
+  const last = names.at(-1) ?? "", parent = names.at(-2) ?? "";
+  return (parent === ".claude" && /^settings(?:\.local)?\.json$/.test(last))
+    || (parent === ".codex" && last === "config.toml")
+    || (names.length === 1 && /^opencode\.jsonc?$/.test(last));
+}
 
 /**
  * A path argument, scoped to the session's worktree: relative to its root, refused if it resolves
@@ -890,6 +915,9 @@ async function scopePath(root, raw, label, { write = false } = {}) {
     const realRelative = path.relative(root.real, real);
     const canonical = realRelative ? realRelative.split(path.sep) : [];
     if ([...parts, ...canonical].some(protectedName)) throw outside("git's own data and protected folders are never patched");
+    if (harnessPermissionFile(parts) || harnessPermissionFile(canonical)) {
+      throw outside("an agent harness's permission settings are changed by the person, never by a chat's own patch");
+    }
   }
   return relative.split(path.sep).join("/") || ".";
 }
@@ -2134,7 +2162,8 @@ function createChatAgentTools({
       // counts as confirmed, so a routine approval the workspace asks for is not asked again.
       let routine = null;
       try { routine = entry.autoReview && !(typeof args.stdin === "string" && args.stdin) ? routineCommand(String(args.cmd ?? "")) : null; } catch { routine = null; }
-      if (routine) return true;
+      // The hard rules first, routine or not: a routine shape is never a pass for what they block.
+      if (routine && !blockedCommand(`${args.cmd ?? ""}`)) return true;
       const auto = entry.autoReview === true && !blockedCommand(`${args.cmd ?? ""}\n${args.stdin ?? ""}`);
       return ask("A chat agent wants to run a command",
         dialogText([...who(entry), ...describeCall(name, args, root),
@@ -2150,8 +2179,10 @@ function createChatAgentTools({
       return ask("A chat agent wants to type into a running command",
         dialogText([...who(entry), "Worktree: ", { value: root.path, own: true }, "\n", ...describeCall(name, args, root), "\n\nSend it once?"]),
         "The user declined this input; it was not sent.", tooLongToShow(name),
-        // Answered for the user only for a command this session started itself.
-        { auto: entry.autoReview === true && entry.commands.has(commandIdOf(name, args)) && !blockedCommand(args.chars), entry, tool: name, signal });
+        // Answered for the user only for a command this session started itself; the person's own
+        // terminal (user) is in the same list but never the agent's.
+        { auto: entry.autoReview === true && entry.commands.has(commandIdOf(name, args))
+          && entry.commands.get(commandIdOf(name, args))?.user !== true && !blockedCommand(args.chars), entry, tool: name, signal });
     }
     return false;
   }
@@ -2457,8 +2488,10 @@ function createChatAgentTools({
    */
   async function permitProjects(entry, projects, tool, signal) {
     const pending = projects.filter((project) => !entry.chatProjects.has(project.id));
-    if (!pending.length || entry.bypass) return true;
+    if (!pending.length) return true;
+    // Before the bypass check: a Full-access subagent is still a subagent nobody watches.
     if (entry.subagent) return failedCall("A subagent reads only its own project's chats; ask the main chat to read other projects.");
+    if (entry.bypass) return true;
     const names = pending.slice(0, MAX_ASKED_PROJECTS).flatMap((project) => ["\n- ", { value: project.name, own: true }]);
     const more = pending.length > MAX_ASKED_PROJECTS ? [`\n- and ${pending.length - MAX_ASKED_PROJECTS} more`] : [];
     const answer = await ask(`A chat agent wants to read chats in ${pending.length === 1 ? "another project" : "other projects"}`,
@@ -2624,7 +2657,12 @@ function createChatAgentTools({
     if (name === "push_notification") return pushNotification(entry, given);
     if (name === "sleep") return sleepCall(entry, given, signal, channel);
     if (name === "app_processes") return listProcesses(given);
-    if (name === "view_app") return viewApp(given);
+    if (name === "view_app") {
+      // The app's window can show another project's chat or Settings, which chat_read would need
+      // the person's yes for, so it is reviewed like a screen capture (reviewDesktop).
+      const verdict = await reviewDesktop(entry, name, given, signal);
+      return verdict === true ? viewApp(given) : verdict;
+    }
     if (name === "computer_guide") {
       if ((given.app !== undefined && typeof given.app !== "string") || (given.topic !== undefined && typeof given.topic !== "string")) {
         return inputError("topic and app must be strings; nothing was read.");
@@ -2645,7 +2683,9 @@ function createChatAgentTools({
         return failedCall("This chat's session has ended; its tools are no longer available.");
       }
       const stopped = unavailable(entry, name, signal);
-      return stopped || subagents.call(entry.aoSession, entry.workspaceId, name, withoutConsent(given));
+      // The chat's own mode caps its subagents' (subagents.cjs start): only a chat that bypasses
+      // permissions can start one in Full access.
+      return stopped || subagents.call(entry.aoSession, entry.workspaceId, name, withoutConsent(given), { parentBypass: entry.bypass === true });
     }
     // Other chats (chat-history.cjs) are read from the app's own data: no worktree is needed.
     if (group === "chats") {
@@ -2655,8 +2695,12 @@ function createChatAgentTools({
         return failedCall("This chat's session has ended; its tools are no longer available.");
       }
       const stopped = unavailable(entry, name, signal);
-      return stopped || chatHistory.call({ session: entry.aoSession, workspaceId: entry.workspaceId, name, args: withoutConsent(given),
+      if (stopped) return stopped;
+      const read = await chatHistory.call({ session: entry.aoSession, workspaceId: entry.workspaceId, name, args: withoutConsent(given),
         permit: (projects) => permitProjects(entry, projects, name, signal) });
+      // Another chat's messages, answers and errors can hold a key someone pasted there. With
+      // "Hide secrets" on, credential shapes are hidden here as they are in handoffs.
+      return redaction && setting(redaction.enabled) ? credentialsHidden(read) : read;
     }
     // A monitor's command is started through this same callTool as exec_command, below.
     if (MONITOR_TOOLS.has(name)) return monitorCall(entry, name, given, channel);
@@ -2683,6 +2727,14 @@ function createChatAgentTools({
       }
     }
     if (WATCH_TOOLS.has(name)) return commandWatchCall(entry, name, args);
+    // The person's own shell (the side panel's Terminal tab, terminalStart) belongs to the person:
+    // an agent can neither find, read, type into nor stop it. It runs outside Codex's sandbox with
+    // the person's full rights, so one typed line there would escape every terminal check.
+    if (group === "terminal" && name !== "exec_command" && name !== "check_exec_environment"
+      && entry.commands.get(commandIdOf(name, args))?.user === true) {
+      return failedCall("That is the person's own terminal in this chat's side panel; a chat agent cannot read, type into or stop it. Start your own command with exec_command.",
+        { code: "PERSON_TERMINAL", execution_status: "not_started" });
+    }
     if (name === "list_commands") {
       const offset = args.offset ?? 0, limit = args.limit ?? 40;
       if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
@@ -2691,7 +2743,7 @@ function createChatAgentTools({
       if (args.verification_only !== undefined && typeof args.verification_only !== "boolean") return inputError("verification_only must be a boolean");
       if (args.include_verification !== undefined && typeof args.include_verification !== "boolean") return inputError("include_verification must be a boolean");
       const known = [...entry.commands.values()]
-        .filter(command => args.verification_only !== true || command.verification)
+        .filter(command => command.user !== true && (args.verification_only !== true || command.verification))
         .sort((left, right) => right.startedAt - left.startedAt || left.id.localeCompare(right.id));
       const commands = [];
       for (const command of known.slice(offset, offset + limit)) {
@@ -2977,13 +3029,28 @@ function createChatAgentTools({
     const stopped = unavailable(entry, "preview_open", signal);
     if (stopped) return stopped;
     if (entry.origins.has(origin)) return true;
+    // Under "Approve for me" on Claude Code the chat's reviewer already judged this preview_open
+    // (the workflow no longer answers it as routine). Any other "Approve for me" chat asks the
+    // reviewer here; when it cannot decide, or the chat is not on "Approve for me", the person
+    // does. A new address is never opened on a timer.
     const reviewed = reviewedUpstream(entry);
-    const decision = previewOriginDecision({ origin, bypass: entry.bypass, reviewed });
+    let decision = previewOriginDecision({ origin, bypass: entry.bypass, reviewed });
+    let unsure = "";
+    if (decision !== "allow" && entry.autoReview === true && typeof reviewCall === "function" && entry.aoSession) {
+      let verdict = { action: "ask", reason: "" };
+      try {
+        verdict = (await reviewCall({ workspaceId: entry.workspaceId, session: entry.aoSession, tool: "preview_open", args: { url: origin } })) ?? verdict;
+      } catch { /* the person decides */ }
+      if (signal?.aborted) return failedCall("This chat's tool call was cancelled.");
+      if (verdict.action === "allow") decision = "allow";
+      else if (verdict.action === "deny") return failedCall(`The reviewer did not allow this chat to open ${origin}${verdict.reason ? `: ${verdict.reason}` : "."}`);
+      else if (verdict.reason) unsure = ` (${String(verdict.reason).slice(0, 200)})`;
+    }
     if (decision !== "allow") {
       const answer = await ask("A chat agent wants to open a page in its preview",
         dialogText([...who(entry), "Address: ", { value: origin }, "\n\nThe chat's own browser would load this page served on this computer; the\n"
-          + "agent could read it, click and type in it. Allow this address for this chat?"]),
-        `The user did not allow this chat to open ${origin}.`, undefined, { auto: entry.autoReview === true, entry, tool: "preview_open", signal });
+          + `agent could read it, click and type in it.${unsure ? `\nThe reviewer could not decide${unsure}.` : ""} Allow this address for this chat?`]),
+        `The user did not allow this chat to open ${origin}.`, undefined, { entry, tool: "preview_open", signal });
       if (answer !== true) return answer;
     }
     const changed = unavailable(entry, "preview_open", signal);

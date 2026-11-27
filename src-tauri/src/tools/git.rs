@@ -31,6 +31,21 @@ pub fn git_status(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError>
             "warnings": [root_check.stderr.trim()]
         })));
     }
+    // Status reads only the workspace's own repository (or the one around it, for a project
+    // folder inside a repository). A repository nested inside the workspace has a config the
+    // agent may have written, from a sandboxed command that can write the worktree, and its
+    // helpers would run here as the user, outside that sandbox.
+    if let Ok(root) = std::fs::canonicalize(ws.root()) {
+        let nested = match std::fs::canonicalize(root_check.stdout.trim()) {
+            Ok(top) => top != root && top.starts_with(&root),
+            Err(_) => true,
+        };
+        if nested {
+            return Err(WorkspaceError::invalid_argument(
+                "git_status reads only this workspace's own repository; that path is inside a nested repository",
+            ));
+        }
+    }
 
     let mut status_args = vec!["status", "--porcelain=v1", "-b"];
     if !include_untracked {
@@ -568,8 +583,11 @@ fn run_git(
     limit: Duration,
 ) -> Result<GitOutput, WorkspaceError> {
     let mut cmd = Command::new("git");
+    // No fsmonitor program ever runs for these reads, whatever a repository's config names: a
+    // config inside the workspace may be the agent's own (see git_status).
     cmd.arg("-C")
         .arg(cwd)
+        .args(["-c", "core.fsmonitor=false"])
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -898,6 +916,35 @@ mod revision_scope_tests {
         git(dir.path(), &["checkout", "-q", "--detach"]);
         check("## HEAD (no branch)", "HEAD", "", 0, 0);
         assert!(git(dir.path(), &["remote"]).is_empty());
+    }
+
+    #[test]
+    fn git_status_refuses_a_repository_nested_in_the_workspace() {
+        // A sandboxed agent command can write the worktree, so it can create `sub/.git` with a
+        // config of its own; git status there would run that config's helpers as the user.
+        let artifacts = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("aiTemp/git-nested-repo-tests");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let dir = tempfile::tempdir_in(artifacts).unwrap();
+        git(dir.path(), &["init", "--template=", "-q", "-b", "main"]);
+        let nested = dir.path().join("sub");
+        std::fs::create_dir_all(&nested).unwrap();
+        git(&nested, &["init", "--template=", "-q", "-b", "main"]);
+        let ws = Workspace::new(dir.path().to_path_buf()).unwrap();
+        let refused = git_status(&ws, &json!({ "path": "sub" })).unwrap_err();
+        assert!(
+            refused.to_string().contains("nested repository"),
+            "{refused}"
+        );
+        // The workspace's own repository, and a plain folder in it, still report.
+        std::fs::create_dir_all(dir.path().join("plain")).unwrap();
+        assert_eq!(git_status(&ws, &json!({})).unwrap()["is_repo"], true);
+        assert_eq!(
+            git_status(&ws, &json!({ "path": "plain" })).unwrap()["is_repo"],
+            true
+        );
     }
 
     fn git(dir: &std::path::Path, args: &[&str]) -> String {

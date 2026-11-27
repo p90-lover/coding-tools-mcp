@@ -1465,6 +1465,30 @@ test("chat_list and chat_read read other chats; another project's need the user'
     const bypass = await session(tools, { id: "ao-bypass", approvalMode: "bypass-permissions" });
     assert.equal((await callTool(bypass.url, bypass.auth, "chat_list", { project: "ws9" })).isError, false);
     assert.equal(confirmations.length, 3);
+
+    // A subagent in Full access is still a subagent nobody watches: its own project only.
+    const fullSub = await tools.lease({ agent: "codex", workspaceId: "ws1", subagent: true, approvalMode: "bypass-permissions" });
+    fullSub.bind("ao-full-sub");
+    const [full] = fullSub.servers;
+    const fullRefused = await callTool(full.url, { authorization: full.headers.Authorization }, "chat_list", { project: "ws8" });
+    assert.match(fullRefused.content[0].text, /A subagent reads only its own project's chats/);
+  } finally { await tools.close(); }
+});
+
+test("with Hide secrets on, chat_read hides credential shapes in another chat's text", async () => {
+  let on = true;
+  const redaction = { enabled: () => on, list: () => ["Database passwords"], redact: async () => ({ ok: true, hidden: 0, refused: 0 }) };
+  const chatHistory = { call: async () => ({ content: [{ type: "text", text: "set DB_PASSWORD=hunter2hunter and key sk_live_1234567890abcdefXYZ" }],
+    structuredContent: { messages: [{ text: "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY" }] }, isError: false }) };
+  const { tools } = fixture({ chatHistory, redaction, workspaces: () => ({ ready: false }) });
+  try {
+    const client = await session(tools);
+    const hidden = await callTool(client.url, client.auth, "chat_read", { chat_id: "t1" });
+    assert.equal(hidden.content[0].text, "set DB_PASSWORD=[hidden: credential] and key [hidden: credential]");
+    assert.doesNotMatch(JSON.stringify(hidden), /hunter2|sk_live_|wJalrX/);
+    on = false;
+    const plain = await callTool(client.url, client.auth, "chat_read", { chat_id: "t1" });
+    assert.match(plain.content[0].text, /hunter2hunter/, "with the setting off, text is returned as written");
   } finally { await tools.close(); }
 });
 
@@ -1649,6 +1673,25 @@ test("view_app shows the model the Coding Tools window as an image, and is offer
     assert.equal((await listed(other.url, other.auth)).includes("view_app"), false);
     assert.equal((await callTool(other.url, other.auth, "view_app", {})).isError, true);
   } finally { await tools.close(); await plain.tools.close(); }
+});
+
+test("view_app is reviewed like a screen capture: a reviewer's deny stops it before anything is captured", async () => {
+  const captured = [];
+  const captureApp = async (options) => { captured.push(options); return { base64: "AA==", mimeType: "image/jpeg", width: 10, height: 10 }; };
+  let verdict = { action: "deny", reason: "another project's chat is on screen" };
+  const { tools, confirmations } = fixture({ captureApp, reviewCall: async () => verdict });
+  try {
+    const codex = await session(tools, { id: "viewer", agent: "codex" });
+    const denied = await callTool(codex.url, codex.auth, "view_app", {});
+    assert.equal(denied.isError, true);
+    assert.match(denied.content[0].text, /reviewer denied view_app/);
+    assert.equal(captured.length, 0, "nothing was captured");
+    verdict = { action: "ask", reason: "" };
+    await callTool(codex.url, codex.auth, "view_app", {});
+    assert.equal(confirmations.length, 1, "an unsure reviewer asks the person");
+    assert.match(confirmations[0].message, /see the Coding Tools window/);
+    assert.equal(captured.length, 1);
+  } finally { await tools.close(); }
 });
 
 test("the goal tools are Codex's, take the chat's own session, and are offered only with a goal service", async () => {
@@ -2436,6 +2479,27 @@ test("Windows spellings that open another file are refused, and patches never wr
       assert.equal(patched.isError, false, allowed);
     }
     assert.equal((await callTool(url, auth, "read_file", { path: ".git/config" })).isError, false, "reading git's data is not writing it");
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("a chat's patch never changes an agent harness's permission settings", async () => {
+  // AO starts Claude Code with the project's and local settings: an allow rule patched in there
+  // would let the agent's later calls run with no permission request at all.
+  const tree = tempTree();
+  const { tools, calls } = fixture({ root: tree.root });
+  try {
+    const { url, auth } = await session(tools);
+    const before = calls.length;
+    for (const target of [".claude/settings.local.json", ".claude/settings.json", ".Claude/Settings.Local.json", ".codex/config.toml", "opencode.json", "opencode.jsonc"]) {
+      const refused = await callTool(url, auth, "apply_patch", { patch: `*** Begin Patch\n*** Add File: ${target}\n+{}\n*** End Patch\n` });
+      assert.equal(refused.isError, true, target);
+      assert.match(refused.content[0].text, /permission settings are changed by the person/, target);
+    }
+    assert.equal(calls.length, before, "none reached the service");
+    for (const allowed of [".claude/commands/review.md", "docs/opencode.json", "src/settings.json", ".claude/agents/x.md"]) {
+      const patched = await callTool(url, auth, "apply_patch", { patch: `*** Begin Patch\n*** Add File: ${allowed}\n+x\n*** End Patch\n` });
+      assert.equal(patched.isError, false, allowed);
+    }
   } finally { await tools.close(); tree.cleanup(); }
 });
 
