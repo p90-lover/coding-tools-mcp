@@ -4601,7 +4601,37 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // Steps a script takes that write nothing at all: output dropped, strict mode on.
   const QUIET_VERBS = new Set(["out-null", "set-strictmode"]);
   // node_modules too: here it is often a junction to another checkout, so a write there leaves the folder.
-  const PROTECTED_WRITE = /(?:^|[\\/])(?:\.git|\.github|\.husky|\.claude|\.codex|\.agents|\.vscode|\.idea|node_modules)(?:[\\/]|$)|(?:^|[\\/])(?:AGENTS\.md|CLAUDE\.md|\.mcp\.json|package\.json)$/i;
+  const PROTECTED_WRITE = /(?:^|[\\/])(?:\.git|\.github|\.husky|\.claude|\.codex|\.agents|\.vscode|\.idea|\.opencode|\.pi|\.gemini|\.mcp-paths|node_modules)(?:[\\/]|$)|(?:^|[\\/])(?:AGENTS\.md|AGENTS\.override\.md|CLAUDE\.md|CLAUDE\.local\.md|GEMINI\.md|\.mcp\.json|package\.json|opencode\.jsonc?|\.npmrc|\.yarnrc(?:\.yml)?|\.pnpmfile\.cjs|conftest\.py)$/i;
+  /**
+   * Whether a value a writing command names may reach a protected place, compared as the name
+   * Windows opens: it drops trailing dots and spaces from each path part (`'AGENTS.md.'`).
+   */
+  const protectedWrite = (value) => {
+    const text = String(value ?? "");
+    return PROTECTED_WRITE.test(text) || PROTECTED_WRITE.test(text.split(/[\\/]/).map((part) => part.replace(/[. ]+$/, "")).join("/"));
+  };
+  // Where a write verb writes: these options' values, else its first positional (Set-Content,
+  // Out-File, New-Item…) or, for a copy or move, its last. PowerShell expands a wildcard there
+  // (`Set-Content AGENTS.m? …` writes AGENTS.md), so a write target holds none.
+  const WRITE_TARGET_OPTIONS = new Set(["-path", "-literalpath", "-filepath", "-destination", "-newname", "-name"]);
+  const COPY_VERBS = new Set(["copy-item", "cpi", "copy", "cp", "move-item", "mi", "move", "mv", "rename-item", "rni", "ren"]);
+  // Switches take no value; every other option of a write verb takes the next word (-Value 'x').
+  const WRITE_SWITCHES = /^-(?:force|recurse|whatif|confirm|passthru|nonewline|append|container|noclobber|r|f|p|v|n)$/i;
+  function writeTargets(tokens, valueOf) {
+    const targets = [], positional = [];
+    for (let at = 1; at < tokens.length; at += 1) {
+      const token = tokens[at];
+      if (/^-[\w-]+$/.test(token)) {
+        if (WRITE_SWITCHES.test(token)) continue;
+        const value = tokens[at += 1];
+        if (value !== undefined && WRITE_TARGET_OPTIONS.has(token.toLowerCase())) targets.push(valueOf(value));
+        continue;
+      }
+      positional.push(valueOf(token));
+    }
+    if (positional.length) targets.push(COPY_VERBS.has(tokens[0].toLowerCase()) ? positional.at(-1) : positional[0]);
+    return targets;
+  }
   /**
    * `text` without its output redirects (`> file`, `>> file`, `2> file`), each checked to write a plain
    * path inside `folder` that is not protected; null when one is not, or for an input redirect.
@@ -4618,7 +4648,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (text[at + 1] === ">") at += 1;
       const target = /^\s*(?:"([^"]*)"|'([^']*)'|([^\s;|&<>"'`(){}]+))/.exec(text.slice(at + 1));
       const file = target ? target[1] ?? target[2] ?? target[3] : "";
-      if (!file || /[$`]/.test(file) || !insideFolder(file, folder) || PROTECTED_WRITE.test(file)) return null;
+      if (!file || /[$`*?[\]]/.test(file) || !insideFolder(file, folder) || protectedWrite(file)) return null;
       at += target[0].length;
       out += " ";
     }
@@ -4737,6 +4767,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (first && /^(?:\.[A-Za-z_]\w*|[-+]?\d+(?:\.\d+)?|-[A-Za-z]\w*)$/.test(first)) continue;
       if (writes && first && WRITE_VERBS.has(first.toLowerCase())) {
         // A write names only places in the folder (checked below with every value) and none that steers agents.
+        // Its target holds no wildcard: PowerShell would expand it onto whatever matches.
+        if (writeTargets(tokens, valueOf).some((target) => /[*?[\]]/.test(String(target ?? "")))) return null;
         wrote = true;
         continue;
       }
@@ -4753,7 +4785,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // A command that writes names no protected place anywhere, nor runs in one: `cd .git; Set-Content
     // hooks\pre-commit …` would write there through a relative path.
     // Every word counts here, `.git` included (the values above leave out what reads as a member name).
-    if (wrote && ([...quoted, ...words].some((value) => PROTECTED_WRITE.test(value)) || (cwd && PROTECTED_WRITE.test(cwd)))) return null;
+    if (wrote && ([...quoted, ...words].some((value) => protectedWrite(value)) || (cwd && protectedWrite(cwd)))) return null;
     return "Read-only inspection inside the workspace folder";
   }
   // The native reviewer: decides a shell request on this machine, with no model and no quota, before
