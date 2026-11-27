@@ -934,11 +934,17 @@ mod revision_scope_tests {
         git(&nested, &["init", "--template=", "-q", "-b", "main"]);
         let ws = Workspace::new(dir.path().to_path_buf()).unwrap();
         let refused = git_status(&ws, &json!({ "path": "sub" })).unwrap_err();
-        assert!(refused.to_string().contains("nested repository"), "{refused}");
+        assert!(
+            refused.to_string().contains("nested repository"),
+            "{refused}"
+        );
         // The workspace's own repository, and a plain folder in it, still report.
         std::fs::create_dir_all(dir.path().join("plain")).unwrap();
         assert_eq!(git_status(&ws, &json!({})).unwrap()["is_repo"], true);
-        assert_eq!(git_status(&ws, &json!({ "path": "plain" })).unwrap()["is_repo"], true);
+        assert_eq!(
+            git_status(&ws, &json!({ "path": "plain" })).unwrap()["is_repo"],
+            true
+        );
     }
 
     fn git(dir: &std::path::Path, args: &[&str]) -> String {
