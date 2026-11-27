@@ -4,7 +4,7 @@ const { AsyncLocalStorage } = require("node:async_hooks");
 const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, roundAnswers, cleanObjective, createGoalStore } = require("./chat-goals.cjs");
+const { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, holdOpenWork, closingAnswers, roundAnswers, cleanObjective, createGoalStore } = require("./chat-goals.cjs");
 const { wakePrompt, wakeupAction, createWakeupStore } = require("./chat-wakeups.cjs");
 const { createChatQueueStore, steerReadIn } = require("./chat-queue.cjs");
 const { createChatDraftStore } = require("./chat-drafts.cjs");
@@ -8496,7 +8496,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return [...new Set([...spread, ...ranked])].slice(0, 3);
   }
   /** `judge`: "Let the model judge" is on, and `ended` says how the round ended when it did not finish. */
-  async function checkGoal(goal, mission, { judge = false, ended = "" } = {}) {
+  async function checkGoal(goal, mission, { judge = false, ended = "", still = () => true } = {}) {
     const { baseUrl, key } = connection();
     const catalog = await models();
     const candidates = freeModels(catalog.models ?? [], catalog.hidden ?? []);
@@ -8506,22 +8506,55 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // The previous round's verdict, so the evaluator can tell a round that only repeated it.
     const previous = goal.round > 1 ? publicText(goal.feedback || "", 1500) : "";
     const prompt = goalCheckPrompt(goal.objective, roundTranscript(message, roundAnswers(mission)), { judge, ended, previous });
+    const ask = async (model) => {
+      const response = await chatCompletion(baseUrl, key, { model, temperature: 0, max_tokens: 500, messages: [{ role: "user", content: prompt }] }, AbortSignal.timeout(60_000));
+      // A model CPA lists can still refuse (seen live 2026-10-23: HTTP 404, and the goal stalled);
+      // the note names it.
+      if (!response.ok) throw await modelCallFailure(response, `the evaluator returned HTTP ${response.status} for ${publicText(model, 80)}`);
+      return parseGoalCheck((await response.json())?.choices?.[0]?.message?.content);
+    };
+    const task = String(mission?.project_id ?? "").slice(0, 8);
     let failure = null;
+    const failed = new Set();
     for (const model of candidates) {
+      let check;
       try {
-        const response = await chatCompletion(baseUrl, key, { model, temperature: 0, max_tokens: 500, messages: [{ role: "user", content: prompt }] }, AbortSignal.timeout(60_000));
-        // A model CPA lists can still refuse (seen live 2026-10-23: HTTP 404, and the goal stalled);
-        // the note names it.
-        if (!response.ok) throw await modelCallFailure(response, `the evaluator returned HTTP ${response.status} for ${publicText(model, 80)}`);
-        const check = parseGoalCheck((await response.json())?.choices?.[0]?.message?.content);
+        // Not met while the agent's own final answer still lists work left (holdOpenWork), whatever
+        // the evaluator read into it.
+        check = holdOpenWork(await ask(model), closingAnswers(mission));
         reviewerAnswered(model);
-        logger?.info?.("ao.goal_checked", { met: check.met, model, round: goal.round, task: String(mission?.project_id ?? "").slice(0, 8) });
-        return { ...check, model };
       } catch (error) {
         failure = error;
+        failed.add(model);
         reviewerFailed(model, error);
-        logger?.warn?.("ao.goal_check_failed", { model, task: String(mission?.project_id ?? "").slice(0, 8), message: publicText(error?.message || error, 200) });
+        logger?.warn?.("ao.goal_check_failed", { model, task, message: publicText(error?.message || error, 200) });
+        continue;
       }
+      if (check.workLeft) logger?.info?.("ao.goal_met_work_left", { model, round: goal.round, task });
+      // "Met" ends the goal for good, and the first evaluator is a quick model: another one, on
+      // another provider where one answers, must agree. A disagreement goes on with its reason. Not
+      // for a goal the person changed meanwhile (`still`): its verdict is dropped anyway.
+      if (check.met && still()) {
+        // Not one that just failed this check: it would only fail again.
+        const others = candidates.filter(other => other !== model && !failed.has(other));
+        const second = others.find(other => modelProvider(other) !== modelProvider(model)) ?? others[0];
+        if (second) {
+          try {
+            const again = holdOpenWork(await ask(second), closingAnswers(mission));
+            reviewerAnswered(second);
+            if (!again.met) {
+              logger?.info?.("ao.goal_met_disputed", { model, second, round: goal.round, task });
+              check = { met: false, stop: false, progress: true, reason: again.reason };
+            }
+          } catch (error) {
+            // A second opinion that could not be had leaves the first one standing.
+            reviewerFailed(second, error);
+            logger?.warn?.("ao.goal_confirm_failed", { model: second, task, message: publicText(error?.message || error, 200) });
+          }
+        }
+      }
+      logger?.info?.("ao.goal_checked", { met: check.met, model, round: goal.round, task });
+      return { ...check, model };
     }
     throw failure;
   }
@@ -8821,7 +8854,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const still = goalGuard(workspaceId, task, goal);
       recheck = () => { if (!still()) retryChangedGoal(workspaceId, task, runId); };
       try {
-        check = await checkGoal({ ...goal }, mission, { judge, ended });
+        check = await checkGoal({ ...goal }, mission, { judge, ended, still });
       } catch (error) {
         if (!still()) return;
         // Not marked judged: the check runs again later (every evaluator was down, or CPA was
@@ -8849,6 +8882,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // The evaluator would end it ("Let the model judge"), but the goal is not met: it waits and goes
       // on with that verdict as the agent's instruction. It used to stall here for good.
       if (check.stop) { goalBackoff(workspaceId, task, runId, `The goal checker would stop: ${check.reason}`); return; }
+      // The agent reported the same blocker (update_goal "blocked") in GOAL_FAILED_ROUNDS rounds in a
+      // row, this one included: the goal goes on, a longer wait each time, as for rounds without progress.
+      const blockedRounds = goal.agentBlockedRunId === runId ? goal.agentBlockedRounds ?? 0 : 0;
+      if (blockedRounds >= GOAL_FAILED_ROUNDS) {
+        goalBackoff(workspaceId, task, runId, `The agent reported the same blocker in ${blockedRounds} rounds in a row: ${check.reason}`);
+        return;
+      }
       // GOAL_FAILED_ROUNDS rounds in a row without progress: the agent is stuck on something it cannot
       // change (seen live: 480 rounds over 14 days on a refused approval and an unavailable account).
       // It waits longer each time instead of stalling, with the verdict as the agent's instruction.
@@ -9054,13 +9094,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // Count distinct goal turns, never repeated calls from one model turn.
       const blockedRounds = goal.agentBlockedRunId === latest.id
         ? (goal.agentBlockedRounds ?? 1) : (goal.agentBlockedRounds ?? 0) + 1;
+      // The agent's word never ends the goal (only the condition met, or the person, does): it stalled
+      // the goal after three reports, with the agent half way. From the third report in a row the next
+      // round waits longer each time instead (goalAfterRun), as for rounds without progress.
       Object.assign(change, {
         agentBlockedRunId: latest.id,
         agentBlockedRounds: blockedRounds,
-        status: blockedRounds >= GOAL_FAILED_ROUNDS ? "stalled" : "active",
         note: blockedRounds >= GOAL_FAILED_ROUNDS
-          ? `The agent reported the same blocker in ${blockedRounds} consecutive rounds; /goal resume retries`
-          : `The agent reported a blocker (${blockedRounds} of ${GOAL_FAILED_ROUNDS} rounds); continuing to seek a resolution`,
+          ? `The agent reported the same blocker in ${blockedRounds} rounds in a row; the goal goes on, waiting longer between rounds`
+          : `The agent reported a blocker (${blockedRounds} round${blockedRounds === 1 ? "" : "s"} in a row); the goal goes on`,
       });
     } else if (status === "paused" && goal.status !== "limited") {
       Object.assign(change, { status: "paused", note: "Paused at your request; /goal resume picks it up again" });
@@ -9074,7 +9116,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         nextAction: applied ? "Report the returned goal status; do not claim unfinished work is complete."
           : goal.status !== "active" ? `The goal remains ${result.goal.status}; only the user or system can resume it.`
             : status === "complete" ? "Completion is provisional. End this turn with verification evidence so the independent evaluator can check it."
-              : "This blocker report was recorded. Repeating it in the same turn does not advance the audit. Seek a permitted resolution; if the same blocker persists in the next goal turn, report it there." };
+              : "This blocker report was recorded; the goal stays active, since only the condition being met or the user ends it. "
+                + "Repeating it in the same turn counts once. Say exactly what only the user can do, keep working on every other part of the goal, "
+                + "and seek a permitted way around the blocker; if it persists in the next goal turn, report it there." };
     }
     return result;
   }

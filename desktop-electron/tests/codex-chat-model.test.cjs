@@ -81,6 +81,18 @@ test("slash commands offer only what applies, and attachments become paths or in
   assert.deepEqual(plain(chat.chatSlashMatches("/st", { chat: true, run: true, open: false })).map((command) => command.name), ["status", "structure"], "/stop only while a mission is open");
   assert.deepEqual(plain(chat.chatSlashMatches("/co", { chat: true, run: true })).map((command) => command.name), ["compact", "context", "copy"]);
   assert.deepEqual(plain(chat.chatSlashMatches("/stop now", { chat: true, run: true })), [], "a space ends the command menu");
+  // Typed in full, a command the menu hides says why instead of doing nothing.
+  assert.equal(chat.chatSlashUnavailable("stop", { chat: true, run: true, open: false }), "Nothing is running in this chat.");
+  assert.equal(chat.chatSlashUnavailable("retry", { chat: true, run: false }), "This chat has no turn yet, so there's nothing for /retry to act on.");
+  assert.equal(chat.chatSlashUnavailable("fork", { chat: false, run: false }), "Open a chat first: /fork works on the chat that's open.");
+  assert.equal(chat.chatSlashUnavailable("stop", { chat: true, run: true, open: true }), "");
+  assert.equal(chat.chatSlashUnavailable("goal", { chat: false, run: false }), "", "/goal starts a chat of its own");
+  for (const command of chat.CHAT_SLASH_COMMANDS) {
+    for (const context of [false, true].flatMap((inChat) => [false, true].flatMap((run) => [false, true].map((open) => ({ chat: inChat, run, open }))))) {
+      const offered = plain(chat.chatSlashMatches(`/${command.name}`, context)).some((entry) => entry.name === command.name);
+      assert.equal(chat.chatSlashUnavailable(command.name, context) === "", offered, `/${command.name} in ${JSON.stringify(context)}: hidden from the menu exactly when it says why`);
+    }
+  }
   assert.equal(chat.chatSlashCommand(" /Stop "), "stop");
   assert.equal(chat.chatSlashCommand("/unknown"), null);
   // Commands with an argument, as Codex takes them: /goal <objective>|pause|resume|edit|clear, /review [focus].

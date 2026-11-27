@@ -69,8 +69,15 @@ export const TEXT_SKIP_MS = 60_000;
 export const TEXT_UNAVAILABLE = "This window's accessibility text took longer than the engine allows, so this snapshot has "
   + 'the screenshot only and no element indexes. Use coordinates in the screenshot; the text is tried again a minute later.';
 
-export function createBridge({ client, windowId, executable, now = () => Date.now() }) {
-  let closed = false, nativeWindow = null, textSkippedUntil = -Infinity;
+const INDEXED_VIEW_MAX_AGE_MS = 25_000;
+
+export function createBridge({ client, windowId, executable, now = () => Date.now(), withNativeTurn }) {
+  let closed = false, nativeWindow = null, textSkippedUntil = -Infinity, indexedView;
+  const isFresh = view => {
+    if (!view) return false;
+    const age = now() - view.at;
+    return age >= 0 && age < INDEXED_VIEW_MAX_AGE_MS;
+  };
   // A screenshot of the window without its text (see TEXT_TIMEOUT).
   async function screenshotOnly(params, window) {
     const result = await client.get_window_state({ ...params, include_text: false, include_screenshot: true, window });
@@ -102,6 +109,8 @@ export function createBridge({ client, windowId, executable, now = () => Date.no
     async call(method, params) {
       if (closed) fail('CODEX_ENGINE_CLOSED');
       validateCall(method, params);
+      const reviewed = indexedView;
+      indexedView = undefined;
       // Rehydrating before every input changes the native observation cache. Keep the exact
       // Window from this grant; Rust and the native helper still verify its process on each call.
       if (!nativeWindow || method === 'get_window') nativeWindow = await client.get_window({ id: windowId });
@@ -112,7 +121,20 @@ export function createBridge({ client, windowId, executable, now = () => Date.no
         return window;
       }
       if (params.window !== undefined && (!object(params.window) || params.window.id !== windowId || params.window.app !== window.app)) fail('CONTROL_SCOPE_MISMATCH');
-      const result = method === 'get_window_state' ? await readState(params, window) : await client[method]({ ...params, window });
+      let result;
+      if (withNativeTurn && method === 'click' && params.element_index !== undefined) {
+        if (!isFresh(reviewed)) fail('CODEX_ELEMENT_INVALID');
+        // end_turn drops the helper's element indexes; approval must not hold the native turn open.
+        result = await withNativeTurn(async () => {
+          const fresh = await client.get_window_state({ window, include_text: true, include_screenshot: false });
+          if (closed) fail('CODEX_ENGINE_CLOSED');
+          if (fresh?.window?.id !== windowId || fresh.window.app !== window.app) fail('CONTROL_SCOPE_MISMATCH');
+          if (fresh.accessibility?.tree !== reviewed.tree || !isFresh(reviewed)) fail('CODEX_ELEMENT_INVALID');
+          return client.click({ ...params, window });
+        });
+      } else {
+        result = method === 'get_window_state' ? await readState(params, window) : await client[method]({ ...params, window });
+      }
       if (closed) fail('CODEX_ENGINE_CLOSED');
       if (method === 'get_window_state') {
         if (!object(result) || result.window?.id !== windowId || result.window?.app !== window.app || !Array.isArray(result.screenshots)) fail('INVALID_CODEX_RESPONSE');
@@ -122,9 +144,12 @@ export function createBridge({ client, windowId, executable, now = () => Date.no
         }
       }
       if (JSON.stringify(result ?? null).length > MAX_MESSAGE - 1024) fail('CODEX_RESPONSE_TOO_LARGE');
+      if (withNativeTurn && method === 'get_window_state' && typeof result.accessibility?.tree === 'string' && result.accessibility.tree) {
+        indexedView = { tree: result.accessibility.tree, at: now() };
+      }
       return result ?? null;
     },
-    async close() { closed = true; await client.close(); },
+    async close() { closed = true; indexedView = undefined; await client.close(); },
   };
 }
 
@@ -137,11 +162,34 @@ export async function loadEngine(config, onUnexpectedExit = () => {}) {
   const { WindowsHelperTransport } = await import(pathToFileURL(path.join(base, 'helper_transport.js')).href);
   const helper = realpathSync(config.helper);
   if (!helper.startsWith(root + path.sep)) fail('INVALID_CODEX_RUNTIME');
-  let bridge;
+  let bridge, indexedTurn;
   const transport = new WindowsHelperTransport({ helperCommand: helper, helperArgs: ['--parent-pid', String(process.pid)], timeoutMs: 10000 });
+  async function endTurn(codexTurnMetadata) {
+    try {
+      await transport.request('end_turn', {}, { codexTurnMetadata, skipTurnTransition: true, timeoutMs: 1000 });
+    } catch {
+      void bridge.close().catch(() => {});
+      fail('CODEX_ENGINE_CLOSED');
+    }
+  }
+  async function withNativeTurn(run) {
+    if (indexedTurn) fail('CODEX_ENGINE_BUSY');
+    const turn = { requested: false, codexTurnMetadata: undefined, terminal: false };
+    indexedTurn = turn;
+    try {
+      return await run();
+    } catch (error) {
+      turn.terminal ||= failureReply(error, bridge.closed).fatal;
+      throw error;
+    } finally {
+      indexedTurn = undefined;
+      if (turn.requested && !turn.terminal && !bridge.closed) await endTurn(turn.codexTurnMetadata);
+    }
+  }
   const client = new WindowsComputerUseClient({ transport: {
     close: () => transport.close(),
     async request(method, params, options) {
+      const turn = indexedTurn;
       let terminal = false;
       try {
         return await transport.request(method, params, {
@@ -151,25 +199,19 @@ export async function loadEngine(config, onUnexpectedExit = () => {}) {
         terminal = failureReply(error, bridge.closed).fatal;
         throw error;
       } finally {
-        // The helper outlives a tool call; its cursor/interaction state must not own the desktop while idle.
-        // Never send cleanup after Escape, a policy stop, or helper loss: the SDK could restart it.
-        if (!terminal && !bridge.closed) {
-          try {
-            await transport.request('end_turn', {}, {
-              codexTurnMetadata: options?.codexTurnMetadata, skipTurnTransition: true, timeoutMs: 1000,
-            });
-          } catch {
-            void bridge.close().catch(() => {});
-            fail('CODEX_ENGINE_CLOSED');
-          }
-        }
+        // The helper cannot retain interaction ownership while idle. Cleanup after a terminal stop could relaunch it.
+        if (turn) {
+          turn.requested = true;
+          turn.codexTurnMetadata = options?.codexTurnMetadata;
+          turn.terminal ||= terminal;
+        } else if (!terminal && !bridge.closed) await endTurn(options?.codexTurnMetadata);
       }
     },
   } });
   if (client.target !== 'windows' || METHODS.some(method => typeof client[method] !== 'function')) {
     await client.close(); fail('INCOMPATIBLE_CODEX_RUNTIME');
   }
-  bridge = createBridge({ client, windowId: config.window_id, executable: config.executable });
+  bridge = createBridge({ client, windowId: config.window_id, executable: config.executable, withNativeTurn });
   // The SDK can otherwise relaunch an exited helper. Physical Escape revokes this worker:
   // even an interruption while idle must require a new local grant, never an automatic restart.
   transport.onExit(() => {

@@ -75,9 +75,14 @@ $rows = foreach ($p in (Get-CimInstance Win32_Process -Property $props)) {
 
 // Started from a worker thread: starting PowerShell from the main thread held every window 1.6 s
 // while Windows loaded it (2026-10-30, the Processes view).
+//
+// The script goes as plain `-Command` text, and without `-ExecutionPolicy Bypass`, which does nothing
+// for an inline command (the policy governs script files). An unsigned app running PowerShell with
+// Bypass and a hidden -EncodedCommand that lists every process is how malware looks: Bitdefender's
+// Advanced Threat Control flagged the app on this sampler (2026-11-27, ATC.Malicious), ended it and
+// quarantined its programs and 115 files they had written, the CPA sign-ins and chat state included.
 async function runPowerShell(script, timeoutMs) {
-  const encoded = Buffer.from(script, "utf16le").toString("base64");
-  const reply = await runOffThread({ file: "powershell.exe", args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+  const reply = await runOffThread({ file: "powershell.exe", args: ["-NoProfile", "-NonInteractive", "-Command", script],
     timeoutMs, maxBytes: 32 * 1024 * 1024 });
   if (reply.timedOut) throw new Error(`PowerShell timed out after ${timeoutMs} ms`);
   if (reply.error) throw new Error(reply.error);

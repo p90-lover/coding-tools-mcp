@@ -4,6 +4,21 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { listAppProcesses, selectOwn, roleOf, uptime, posixSnapshot } = require("../electron/app-processes.cjs");
 
+test("the app never starts PowerShell the way malware does: no -ExecutionPolicy Bypass, and the process sampler's script in the open", () => {
+  // 2026-11-27: Bitdefender's Advanced Threat Control flagged the app (ATC.Malicious) right after the
+  // sampler ran `powershell -ExecutionPolicy Bypass -EncodedCommand <list every process>`, ended it and
+  // quarantined its programs and 115 files they had written. Bypass does nothing for an inline command.
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const source = (name) => fs.readFileSync(path.join(__dirname, "..", "electron", name), "utf8");
+  for (const name of ["app-processes.cjs", "renderer-accessibility.cjs", "chatgpt-desktop-win32.cjs"]) {
+    assert.doesNotMatch(source(name), /"-ExecutionPolicy",\s*"Bypass"/, `${name} starts PowerShell with Bypass`);
+  }
+  const sampler = source("app-processes.cjs");
+  assert.match(sampler, /args: \["-NoProfile", "-NonInteractive", "-Command", script\]/, "the sampler's script goes as plain text");
+  assert.doesNotMatch(sampler, /"-EncodedCommand"/);
+});
+
 const T0 = Date.parse("2026-10-22T00:00:00Z");
 const row = (pid, ppid, name, extra = {}) => ({ pid, ppid, name, exe: `C:\\Other\\${name}`, createdMs: T0 + pid, cpuMs: 0,
   ws: 100 * 1048576, priv: 80 * 1048576, threads: 4, handles: 50, ...extra });

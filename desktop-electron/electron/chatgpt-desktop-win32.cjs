@@ -484,7 +484,9 @@ function createWin32Helper({ logger, spawnProcess = spawn } = {}) {
     if (child && child.exitCode === null && !child.killed) return child;
     const encoded = Buffer.from(HELPER_SCRIPT, "utf16le").toString("base64");
     child = spawnProcess(path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), [
-      "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded,
+      // No `-ExecutionPolicy Bypass`: it does nothing for an inline command, and antivirus scores it as
+      // a malware mark (app-processes.cjs runPowerShell, 2026-11-27).
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded,
     ], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     buffer = "";
     child.stdout.setEncoding("utf8");

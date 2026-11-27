@@ -35,7 +35,7 @@ import { INIT_PROMPT, PLAN_PREFIX, planMessage, reviewPrompt } from "./codex-pro
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalDetail, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_BYTES, CHAT_MESSAGE_LIMIT, chatList, chatMessageBytes, chatMessageFits, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen, hasHiddenSecret,
-  chatAgentSessions, chatAgentSummary, chatDetailLinks, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
+  chatAgentSessions, chatAgentSummary, chatDetailLinks, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatSlashUnavailable, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatDetailLink, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, workGroupRows, workSegmentSteps, type ChatLiveSegment, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshItemDetail, dshLiveTitle, dshQuietNote, dshRetryNote, steerReader, steerReceipts, turnReceipt, waitsForPerson,
   cpaRefusalNote, type ChatGoal, type ChatWakeup, type CpaRefusal,
@@ -2521,6 +2521,9 @@ export function AgentOrchestratorChat({
   const runCommand = async (name: string, arg = "", typed = true) => {
     setSlashIndex(0);
     if (typed) setDraft("");
+    // Typed in full, a command the picker hides here says why instead of doing nothing.
+    const unavailable = chatSlashUnavailable(name, { chat: Boolean(selectedTaskId), run: Boolean(latest), open: runOpen });
+    if (unavailable) { say(`/${name}`, unavailable); return; }
     try {
       switch (name) {
         case "goal": {

@@ -277,7 +277,8 @@ const VIEW_APP_DEFS = Object.freeze([{
   annotations: { readOnlyHint: true },
 }]);
 // The app's own goal tools, Codex's (codex-rs/ext/goal) word for word, on the chat's /goal
-// (chat-goals.cjs). One addition: update_goal may also change the objective, as the user's Edit does.
+// (chat-goals.cjs). Two changes: update_goal may also change the objective, as the user's Edit does,
+// and a `blocked` report never ends the goal (it ended Codex's after three, with the work half done).
 const GOAL_TOOL_DEFS = Object.freeze([{
   name: "get_goal", title: "Get the goal",
   description: "Get the current goal for this thread, including status, budgets, token and elapsed-time usage, and remaining token budget.",
@@ -299,9 +300,8 @@ const GOAL_TOOL_DEFS = Object.freeze([{
   description: "Update the existing goal.\n"
     + "Set status to `paused` only at the user's explicit request to pause this goal, never on your own initiative. Ask if unclear; a later resume revokes that request. Report the returned status and stop goal work. Budget limits take precedence over pausing.\n"
     + "Set status to `complete` only when the objective has actually been achieved and no required work remains.\n"
-    + "Report status `blocked` in each goal turn where you cannot make meaningful progress without user input or an external-state change. The app records the report but leaves the goal active until it has received reports in three consecutive distinct goal turns. Repeated calls in the same turn count only once.\n"
-    + "Read statusUpdate.applied, blockedRounds and nextAction: a recorded report is not an applied status change. If the user resumes a blocked goal, the app starts a fresh blocked audit.\n"
-    + "When the threshold is met, the returned goal.status is `blocked`; report that actual status and the blocker.\n"
+    + "Report status `blocked` in each goal turn where you cannot make meaningful progress without user input or an external-state change. The app records the report; the goal stays active, because only the condition being met or the user ends it. After reports in three consecutive distinct goal turns, the next rounds wait longer before they start. Repeated calls in the same turn count only once.\n"
+    + "Read statusUpdate.applied, blockedRounds and nextAction: a recorded report is not an applied status change. When you report a blocker, say exactly what only the user can do and keep working on every other part of the goal in the same turn.\n"
     + "Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.\n"
     + "Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.\n"
     + "You cannot use this tool to resume, budget-limit, or usage-limit a goal; those status changes are controlled by the user or system.\n"
@@ -312,8 +312,8 @@ const GOAL_TOOL_DEFS = Object.freeze([{
     properties: {
       status: { type: "string", enum: ["complete", "blocked", "paused"], description: "`paused` requires an explicit user request. Set to "
         + "`complete` only when the objective is achieved and no required work remains. Report `blocked` once per goal turn at an "
-        + "impasse; the app applies it after three consecutive distinct reports. Inspect statusUpdate for the recorded count and "
-        + "whether the change was applied. Resuming a blocked goal starts a fresh audit." },
+        + "impasse; it is recorded and the goal stays active (three consecutive distinct reports make the next rounds wait longer). "
+        + "Inspect statusUpdate for the recorded count and whether the change was applied." },
       objective: { type: "string", description: "The goal's new objective, only when the user asks to change it." },
     },
   },

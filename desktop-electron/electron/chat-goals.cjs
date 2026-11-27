@@ -173,6 +173,70 @@ function parseGoalCheck(text) {
 }
 
 /**
+ * The headings and labels an agent's final answer puts over work it has not done ("## What's left",
+ * "### Still incomplete", "**Still open:**", "## 还剩什么"). Matched at the start of the label, so
+ * "What's left (not a code bug)" counts.
+ */
+const LEFT_LABELS = [
+  "what's left", "what is left", "what's still left", "what remains", "what still needs", "still left", "still open",
+  "still incomplete", "still missing", "still pending", "still to do", "still unverified", "still not done", "still blocked",
+  "not done yet", "not yet done", "remaining work", "remaining items", "remaining steps", "remaining tasks", "remaining issues",
+  "remaining gaps", "remaining problems", "left to do", "next steps", "next step", "open items", "open issues", "open problems",
+  "open questions", "outstanding work", "outstanding items", "outstanding issues", "unfinished",
+  "还剩", "剩下", "剩余", "待办", "未完成", "尚未完成", "下一步", "后续", "遗留", "仍未", "还没",
+  "還剩", "剩餘", "待辦", "尚未", "後續", "遺留", "還沒",
+];
+// Words that name left work only as the whole label: "Remaining:" but not "Remaining budget: 40%",
+// "To do:" but not "To do this, I ran …:".
+const LEFT_LABELS_EXACT = new Set(["remaining", "outstanding", "to do", "todo", "unverified", "left", "pending"]);
+// A section that says nothing is left: "Nothing.", "None — the condition holds.", "无".
+const NOTHING_LEFT = /^(?:none|nothing|n\/a|no (?:remaining|open|outstanding)|无|無|没有|沒有|暂无|暫無)(?![a-z])/i;
+const plainLabel = (text) => text.toLowerCase().replace(/[’`]/g, "'").replace(/[*_]/g, "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
+const isLeftLabel = (text) => {
+  const label = plainLabel(text);
+  return LEFT_LABELS.some((left) => label.startsWith(left)) || LEFT_LABELS_EXACT.has(label.replace(/[\s:：.]+$/, ""));
+};
+/**
+ * The work an agent's final answer says is still left, or "" when it names none: the body of its
+ * first "what's left" heading (to the next heading) or label (to the paragraph's end). A goal is not
+ * met while the agent itself says so: a quick evaluator called a goal met over an answer whose
+ * "## What's left" named the upgrades that still did not run and the raid that did no damage (seen
+ * in the saved goals, 2026-11-25), and the goal ended with the agent half way.
+ */
+function workLeft(answer) {
+  const lines = String(answer ?? "").split(/\r?\n/);
+  for (let at = 0; at < lines.length; at += 1) {
+    const heading = /^\s{0,3}#{1,6}\s+(.+)$/.exec(lines[at]);
+    const label = heading ? null : /^\s*(?:[-*]\s+)?(?:\*\*|__)?([^*_:：\n]{2,48}?)(?:\*\*|__)?\s*[:：]\s*(?:\*\*|__)?(.*)$/.exec(lines[at]);
+    const title = heading?.[1] ?? label?.[1];
+    if (!title || !isLeftLabel(title)) continue;
+    const body = label?.[2] ? [label[2]] : [];
+    for (let next = at + 1; next < lines.length; next += 1) {
+      if (/^\s{0,3}#{1,6}\s/.test(lines[next]) || (!heading && !lines[next].trim())) break;
+      body.push(lines[next]);
+    }
+    // Markdown emphasis goes, identifiers keep their underscores (town_hall).
+    const text = body.map((line) => line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, "").replace(/\*\*|__|`/g, "").trim()).filter(Boolean)
+      .reduce((said, line) => !said ? line : `${said}${/[.!?。！？；;]$/.test(said) ? " " : "; "}${line}`, "");
+    if (text && !NOTHING_LEFT.test(text)) return utf8Head(text.replace(/\s+/g, " "), 600);
+  }
+  return "";
+}
+/**
+ * A "met" verdict over a round whose own final answer (`answers`, its closing cards' answers) still
+ * lists work left is not met: the agent is told to do that work, or to say plainly that an item is
+ * outside the condition rather than list it as left. Any other verdict stands.
+ */
+function holdOpenWork(check, answers) {
+  if (!check?.met) return check;
+  const left = (answers ?? []).map((answer) => workLeft(typeof answer === "string" ? answer : answer?.text)).find(Boolean);
+  if (!left) return check;
+  const reason = `Not met yet: your own final answer still lists work left (${left}). Do that work in this round and check it; `
+    + "if an item is really outside the condition, say so in your answer instead of listing it as left.";
+  return { met: false, stop: false, progress: true, reason: reason.slice(0, REASON_LIMIT), workLeft: left };
+}
+
+/**
  * The answers of a settled run's closing cards: cards no other card waits on. The retry sidecar and
  * a Command approver aside: nothing waits on an approver either, but its answers are verdicts on
  * commands, not the work.
@@ -299,4 +363,4 @@ function createGoalStore({ file = null, now = Date.now } = {}) {
   };
 }
 
-module.exports = { goalMessage, withoutGoalRules, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, roundAnswers, cleanObjective, createGoalStore, GOAL_MESSAGE_BYTES, GOAL_RULES, GOAL_RULES_AGAIN };
+module.exports = { goalMessage, withoutGoalRules, roundTranscript, goalCheckPrompt, parseGoalCheck, workLeft, holdOpenWork, closingAnswers, roundAnswers, cleanObjective, createGoalStore, GOAL_MESSAGE_BYTES, GOAL_RULES, GOAL_RULES_AGAIN };

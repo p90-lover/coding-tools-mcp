@@ -72,7 +72,9 @@ function applyLaunchSwitch(app, statePath, { platform = process.platform, readFi
 function readScreenReaderFlag(run = execFileOffThread) {
   const encoded = Buffer.from(SCREEN_READER_SCRIPT, "utf16le").toString("base64");
   return new Promise((resolve) => {
-    run(POWERSHELL, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+    // No `-ExecutionPolicy Bypass`: it does nothing for an inline command, and it is one of the marks
+    // an antivirus scores as malware (app-processes.cjs runPowerShell, 2026-11-27).
+    run(POWERSHELL, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
       { windowsHide: true, timeout: 20_000, maxBuffer: 64 * 1024 },
       (error, stdout) => {
         const found = error ? null : /screenReader=(\d+)/.exec(String(stdout ?? ""));
