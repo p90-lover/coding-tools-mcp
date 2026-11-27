@@ -4,29 +4,20 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
+// Everything this file used from Electron comes through the host interface
+// (docs/specs/electron-host-seam, -windows, -panes, -lifecycle): Electron's today, a WebView2 host's
+// later. Only what the backend calls is there; the window and view classes are Electron's own until
+// then. The entry (main-with-provider.cjs) registers the host before this file loads; loaded alone,
+// this builds one. Registering it keeps browser-host.cjs, which asks for the current host, on it.
+const { currentHost, setCurrentHost } = require("./host/current.cjs");
+const runningHost = currentHost();
+setCurrentHost(runningHost);
 const {
-  app,
-  BrowserWindow,
-  BaseWindow,
-  WebContentsView,
-  clipboard,
-  dialog,
-  ipcMain,
-  Menu,
-  net: electronNet,
-  nativeImage,
-  nativeTheme,
-  Notification,
-  screen,
-  safeStorage,
-  session,
-  shell,
-  Tray,
-  webFrameMain,
-  webContents: electronWebContents,
-  powerMonitor,
-  powerSaveBlocker,
-} = require("electron");
+  app, ipcMain, net: electronNet, webFrameMain, webContents: electronWebContents,
+  clipboard, nativeTheme, Notification, safeStorage, shell, powerMonitor, powerSaveBlocker,
+  BrowserWindow, BaseWindow, Tray, screen, dialog, Menu, nativeImage,
+  WebContentsView, session,
+} = runningHost;
 const { BrowserHost, navigationErrorForLog, waitForManualOperation, writeRestartMarker } = require("./browser-host.cjs");
 const { createSignInRetryWait } = require("./sign-in-retry-wait.cjs");
 const { prepareBrowserDebugging } = require("./browser-debugging.cjs");
