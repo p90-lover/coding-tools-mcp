@@ -33,7 +33,7 @@ const OVERLAY_LEASE: Duration = Duration::from_secs(3);
 const FRAME_AGE: Duration = Duration::from_secs(15);
 const MAX_RECEIPTS: usize = 256;
 const BUSY_WAIT: Duration = Duration::from_secs(10);
-/// A receipt's outcome when the input never left: the engine could not reach the window.
+/// Settled even on failure: the operation is known not to have sent input.
 const NOT_SENT: &str = "not_sent";
 /// Whether a receipt's input is settled: submitted, or known never to have been sent.
 fn settled(receipt: &Value) -> bool {
@@ -434,11 +434,19 @@ pub fn focus_local_target_in_session(session_id: &str) -> Result<()> {
         .as_ref()
         .filter(|lease| lease.id == session_id)
         .cloned()
-        .ok_or_else(|| error("CONTROL_NOT_ARMED", "The selected session is no longer active"))?;
+        .ok_or_else(|| {
+            error(
+                "CONTROL_NOT_ARMED",
+                "The selected session is no longer active",
+            )
+        })?;
     check_same_lease(&lease, false)?;
     if let Err(error) = native::focus(&lease.target) {
         let mut s = state();
-        if s.lease.as_ref().is_some_and(|current| current.id == lease.id) {
+        if s.lease
+            .as_ref()
+            .is_some_and(|current| current.id == lease.id)
+        {
             s.stop("Foreground activation failed");
             drop(s);
             wake();
@@ -857,16 +865,7 @@ fn execute_codex_method(l: &Lease, args: &Value, method: &str) -> Result<Value> 
             Ok(value)
         }
     });
-    let mut result = match outcome {
-        Ok(native_result) => {
-            let observation = matches!(method, "get_window" | "get_window_state");
-            json!({"ok":true,"request_id":id,"action":method,"engine":"codex_sky","native_result":native_result,
-                "input_sent":!observation,"verified":observation,"outcome":"input_submitted","retry_allowed":false})
-        }
-        Err(_) => {
-            json!({"ok":false,"request_id":id,"action":method,"engine":"codex_sky","outcome":"unknown","retry_allowed":false,"requires_reobserve":true,"error":"Codex engine could not complete the operation; inspect control status before proceeding"})
-        }
-    };
+    let mut result = codex_method_receipt(&id, method, outcome);
     // A native image is also the regular MCP image envelope, not a base64 string hidden in text.
     if let Some(image) = result
         .get_mut("native_result")
@@ -884,6 +883,27 @@ fn execute_codex_method(l: &Lease, args: &Value, method: &str) -> Result<Value> 
         Ok(tool_ok(result))
     } else {
         Ok(with_post_frame(l, result))
+    }
+}
+
+fn codex_method_receipt(id: &str, method: &str, outcome: Result<Value>) -> Value {
+    let observation = matches!(method, "get_window" | "get_window_state");
+    match outcome {
+        Ok(value) => json!({
+            "ok":true, "request_id":id, "action":method, "engine":"codex_sky", "native_result":value,
+            "input_sent":!observation, "verified":observation, "retry_allowed":false,
+            "outcome":if observation { NOT_SENT } else { "input_submitted" }
+        }),
+        Err(e) if observation => json!({
+            "ok":false, "request_id":id, "action":method, "engine":"codex_sky", "code":e.code(),
+            "outcome":NOT_SENT, "input_sent":false, "verified":false, "retry_allowed":false,
+            "requires_reobserve":true, "error":"Could not observe the selected window. No input was sent."
+        }),
+        Err(e) => json!({
+            "ok":false, "request_id":id, "action":method, "engine":"codex_sky", "code":e.code(),
+            "outcome":"unknown", "retry_allowed":false, "requires_reobserve":true,
+            "error":"Codex engine could not complete the operation; inspect control status before proceeding"
+        }),
     }
 }
 
@@ -1176,6 +1196,31 @@ pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_observations_never_leave_an_uncertain_input() {
+        for method in ["get_window", "get_window_state"] {
+            let read = codex_method_receipt("read", method, Ok(json!({})));
+            assert_eq!(read["ok"], true);
+            assert_eq!(read["verified"], true);
+            assert_eq!(read["outcome"], NOT_SENT);
+            assert_eq!(read["input_sent"], false);
+
+            let failed =
+                codex_method_receipt("read", method, Err(error("TEST_FAILURE", "private")));
+            assert_eq!(failed["ok"], false);
+            assert_eq!(failed["code"], "TEST_FAILURE");
+            assert_eq!(failed["input_sent"], false);
+            assert_eq!(failed["requires_reobserve"], true);
+            assert_eq!(failed["retry_allowed"], false);
+            assert!(!failed.to_string().contains("private"));
+            assert!(settled(&failed));
+        }
+        let input = codex_method_receipt("click", "click", Err(error("TEST_FAILURE", "private")));
+        assert!(!settled(&input));
+        assert!(input.get("input_sent").is_none());
+        assert_eq!(input["retry_allowed"], false);
+    }
 
     #[test]
     fn computer_sequence_does_not_offer_resume_for_a_terminal_receipt() {
