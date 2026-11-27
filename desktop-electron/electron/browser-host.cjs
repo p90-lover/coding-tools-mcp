@@ -1,7 +1,9 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomBytes } = require("node:crypto");
-const { clipboard, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
+const { WebContentsView } = require("electron");
+// Desktop services through the host interface (docs/specs/electron-host-seam): null under plain Node.
+const { clipboard, powerMonitor, powerSaveBlocker, shell } = require("./host/electron-host.cjs").createElectronHost(require("electron"));
 const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { conversationPatchScript } = require("./chatgpt-conversation-actions.cjs");
 const { blockChatGptTelemetry } = require("./chatgpt-telemetry-block.cjs");

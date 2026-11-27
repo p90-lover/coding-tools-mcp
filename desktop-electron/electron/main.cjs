@@ -9,24 +9,20 @@ const {
   BrowserWindow,
   BaseWindow,
   WebContentsView,
-  clipboard,
   dialog,
   ipcMain,
   Menu,
   net: electronNet,
   nativeImage,
-  nativeTheme,
-  Notification,
   screen,
-  safeStorage,
   session,
-  shell,
   Tray,
   webFrameMain,
   webContents: electronWebContents,
-  powerMonitor,
-  powerSaveBlocker,
 } = require("electron");
+// Desktop services come through the host interface (docs/specs/electron-host-seam): Electron's
+// today, a WebView2 host's later. Only the methods the backend calls are there.
+const { clipboard, nativeTheme, Notification, safeStorage, shell, powerMonitor, powerSaveBlocker } = require("./host/electron-host.cjs").createElectronHost(require("electron"));
 const { BrowserHost, navigationErrorForLog, waitForManualOperation, writeRestartMarker } = require("./browser-host.cjs");
 const { createSignInRetryWait } = require("./sign-in-retry-wait.cjs");
 const { prepareBrowserDebugging } = require("./browser-debugging.cjs");
