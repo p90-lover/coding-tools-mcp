@@ -42,6 +42,15 @@ test("writes inside the workspace folder pass the native reviewer, with no model
   assert.equal(readOnlyInspection("Get-Content x > y", FOLDER), null);
 });
 
+test("a write never reaches a protected file through a wildcard, a trailing dot or a name the list missed", async () => {
+  for (const command of [
+    "Set-Content AGENTS.m? 'new standing rules'", "Set-Content 'AGENTS.md.' 'x'", "Set-Content packag?.json '{}'",
+    "Set-Content -Path .gi?\\config -Value 'x'", "Get-Content README.md > 'AGENTS.md '",
+    "Set-Content .npmrc 'x'", "Set-Content opencode.json '{}'", "Set-Content CLAUDE.local.md 'x'", "Set-Content conftest.py 'x'",
+  ]) assert.equal(await review(command), null, command);
+  assert.ok(await review("Set-Content out\\notes.txt 'hi'"), "an ordinary file in the folder is still written");
+});
+
 test("a command that writes and runs a script, or runs one by bare name, is left to the quota reviewers", async () => {
   // The script is read before the command runs; the command's own write could replace it first.
   const files = scripts({ "x.ps1": "Write-Output ok\n", "npx.ps1": "Write-Output ok\n" });
