@@ -57,6 +57,7 @@ function tabLabel(tab: string, copy: Copy): string {
     oauth: copy.providerOAuth,
     register: copy.register,
     "workspace-auth": copy.workspaceAuth,
+    "ssh-connections": "SSH hosts",
     activity: copy.activity,
     rtk: "RTK",
     "antigravity-cli": "Antigravity CLI",

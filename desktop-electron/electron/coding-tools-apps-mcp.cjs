@@ -21,9 +21,18 @@ const TOOL_NAMES = Object.freeze([
   "apps_status",
 ]);
 const READ_ONLY_TOOLS = new Set(["apps_list", "apps_catalog", "apps_status"]);
+// Modules only the person drives, from the app's own pages. The SSH hosts list decides which
+// servers agents may reach and which host keys are trusted, so nothing here lists it, describes it
+// or calls it: these tools are what an agent's catalog read (control-server.cjs) and the tools.call
+// route reach. The hosts page uses the window's own apps.call, behind the focused-window check.
+const PERSON_ONLY_MODULES = new Set(["ssh-connections"]);
 
 function text(value, fallback = "") {
   return typeof value === "string" ? value.trim() : fallback;
+}
+
+function personOnly(id) {
+  return PERSON_ONLY_MODULES.has(text(id).toLowerCase());
 }
 
 function asRecord(value) {
@@ -129,12 +138,28 @@ function createCodingToolsAppsMcp({ getHost } = {}) {
     return TOOL_NAMES.includes(text(name));
   }
 
+  /** A listing without the person-only modules: a tool's caller never learns they exist. */
+  function withoutPersonOnly(listing) {
+    const record = asRecord(listing);
+    if (!Array.isArray(record.modules)) return record;
+    return { ...record, modules: record.modules.filter((entry) => !personOnly(asRecord(entry).id)) };
+  }
+
+  /** Refused before the host is asked, whichever field names the module. */
+  function refusePersonOnly(input) {
+    for (const id of [input.moduleId, input.handle]) {
+      if (personOnly(id)) throw new Error(`${text(id).toLowerCase()} is managed only from the Coding Tools window; tools cannot call it`);
+    }
+  }
+
   function isReadOnly(name, args = {}) {
     const tool = text(name);
     if (READ_ONLY_TOOLS.has(tool)) return true;
     if (tool !== "apps_call" && tool !== "apps_invoke") return false;
     const host = hostOrNull();
     const input = asRecord(args);
+    // Never a read: the call is refused below, and until then it is held to the focused window.
+    if (personOnly(input.moduleId) || personOnly(input.handle)) return false;
     const id = text(input.moduleId) || text(input.handle);
     const operation = text(input.operation);
     if (!host || typeof host.isReadOnly !== "function" || !id || !operation) return false;
@@ -143,7 +168,7 @@ function createCodingToolsAppsMcp({ getHost } = {}) {
 
   async function status() {
     const host = requireHost();
-    const listed = host.list();
+    const listed = withoutPersonOnly(host.list());
     const modules = [];
     for (const entry of asList(listed.modules)) {
       let inspect = null;
@@ -187,10 +212,11 @@ function createCodingToolsAppsMcp({ getHost } = {}) {
     const tool = text(name);
     if (!hasTool(tool)) throw new Error(`Unknown apps MCP tool ${name}`);
     const input = asRecord(args);
+    if (tool === "apps_call" || tool === "apps_invoke") refusePersonOnly(input);
     const host = requireHost();
     if (tool === "apps_list") {
       return sanitizePublic({
-        ...host.list(),
+        ...withoutPersonOnly(host.list()),
         via: "codingTools.apps.list",
         dedicatedListenPorts: false,
         proxySeed: PROXY_SEED,
@@ -198,7 +224,7 @@ function createCodingToolsAppsMcp({ getHost } = {}) {
     }
     if (tool === "apps_catalog") {
       return sanitizePublic({
-        ...host.catalog(),
+        ...withoutPersonOnly(host.catalog()),
         via: "codingTools.apps.catalog",
         dedicatedListenPorts: false,
         proxySeed: PROXY_SEED,
@@ -255,6 +281,7 @@ function createCodingToolsAppsMcp({ getHost } = {}) {
 
 module.exports = Object.freeze({
   APPS_MCP_TOOLS: TOOL_NAMES,
+  PERSON_ONLY_MODULES: Object.freeze([...PERSON_ONLY_MODULES]),
   PROXY_SEED,
   createCodingToolsAppsMcp,
   mergeAppsCatalog,

@@ -32,6 +32,7 @@ import { ChatPages } from "./features/ChatPages";
 import { ChatAddonSettings } from "./features/ChatAddonSettings";
 import { AgentOrchestratorTeamsSurface } from "./features/AgentOrchestratorTeamsSurface";
 import { SubagentsSurface } from "./features/SubagentsSurface";
+import { SshConnectionsSurface } from "./features/SshConnectionsSurface";
 import { ComputerUseSurface } from "./features/ComputerUseSurface";
 import { AppLayoutSurface } from "./features/AppLayoutSurface";
 import { AntigravityCliSurface } from "./features/AntigravityCliSurface";
@@ -965,6 +966,7 @@ function LauncherShell({
                 <SidebarItem active={surface === "oauth"} icon="key" label={copy.providerOAuth} onClick={() => navigateSurface("oauth")} />
                 <SidebarItem active={surface === "register"} icon="userPlus" label={copy.register} onClick={() => navigateSurface("register")} />
                 <SidebarItem active={surface === "workspace-auth"} icon="shield" label={copy.workspaceAuth} onClick={() => navigateSurface("workspace-auth")} />
+                <SidebarItem active={surface === "ssh-connections"} icon="terminal" label="SSH hosts" onClick={() => navigateSurface("ssh-connections")} />
               </SidebarGroup>
               <section className={`sidebar-more${moreToolsShown ? " is-open" : ""}${moreToolsPinned ? " is-pinned" : ""}`}>
                 <div className="sidebar-more-head">
@@ -1132,6 +1134,9 @@ function LauncherShell({
             ))}
             {keepAlive("workspace-auth", () => (
               <ContentSurface title={copy.workspaceAuth}><WorkspaceAuthPanel copy={copy} language={language} setError={setError} /></ContentSurface>
+            ))}
+            {keepAlive("ssh-connections", () => (
+              <SshConnectionsSurface active={surface === "ssh-connections"} setError={setError} />
             ))}
             {keepAlive("native-codex", () => (
               <ContentSurface title={copy.nativeCodex}><NativeCodexPanel copy={copy} language={language} setError={setError} /></ContentSurface>

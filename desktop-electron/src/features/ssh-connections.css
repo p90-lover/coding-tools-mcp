@@ -1,0 +1,66 @@
+/* Connections > SSH hosts (SshConnectionsSurface.tsx). The page is the app's own: its shell, the App
+   plugins bar and chips, the settings row and switch, the buttons, the notice row, the field rows and
+   the dialog panel (.bigger-context-recommendation). This file adds only the host card and the pieces
+   inside the dialogs, in the same tokens. It loads before styles.css (main.tsx imports App first), so
+   a rule that changes one of the app's own classes is scoped to win over it. */
+
+.ssh-connections .surface-empty-note { margin: 10px 0 0; line-height: 1.5; }
+.ssh-connections .notice-row { margin: -6px 0 18px; }
+
+.ssh-hosts { display: grid; gap: 10px; margin-top: 6px; }
+.ssh-host {
+  padding: 12px 14px 0;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: var(--color-background-elevated);
+}
+.ssh-host.is-changed { border-color: var(--red-400); }
+.ssh-host-head { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.ssh-host-name { display: grid; flex: 1 1 auto; gap: 2px; min-width: 0; }
+.ssh-host-name strong { overflow: hidden; color: var(--color-text-primary); font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.ssh-host-address { overflow: hidden; color: var(--color-text-tertiary); font-family: var(--font-mono); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.ssh-host-state { flex: none; }
+/* The app's chips stop at a warning; a blocked host is an error. */
+.ssh-host-state.is-blocked { background: var(--color-background-status-error); color: var(--color-text-error); }
+.ssh-host-actions { display: flex; flex: none; align-items: center; gap: 8px; }
+.ssh-host-actions .button-primary, .ssh-host-actions .button-secondary { min-height: 26px; }
+.ssh-host-key { display: grid; gap: 3px; margin: 10px 0 0; }
+.ssh-host-key code { color: var(--color-text-secondary); font-size: var(--text-xs); overflow-wrap: anywhere; }
+.ssh-host-key small, .ssh-host-note { color: var(--color-text-tertiary); font-size: var(--text-xs); line-height: 1.45; }
+.ssh-host-note { margin: 10px 0 0; overflow-wrap: anywhere; }
+.ssh-host-note.is-error { color: var(--color-text-error); }
+.ssh-host .ssh-host-production { min-height: 58px; margin-top: 10px; border-top: 1px solid var(--color-border-light); }
+.ssh-host .app-plugin-detail { margin: 0 0 12px; }
+
+/* Dialogs: the app's dialog panel, wider for a fingerprint and scrolling when the window is short. */
+.bigger-context-recommendation.ssh-dialog { width: min(520px, 100%); max-height: calc(100vh - var(--height-titlebar) - 40px); overflow-y: auto; }
+.bigger-context-recommendation.ssh-dialog footer { flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.ssh-dialog .notice-row { margin-top: 12px; }
+.ssh-dialog .field-row { grid-template-columns: 112px minmax(0, 1fr); }
+.ssh-dialog .field-row.is-stacked { border-bottom: 0; }
+.ssh-dialog .field-row small { grid-column: 1 / -1; margin: -8px 0 10px; color: var(--color-text-tertiary); font-size: var(--text-xs); line-height: 1.45; }
+.ssh-dialog code { padding: 0 4px; border-radius: var(--radius-xs); background: var(--color-background-control); font-size: var(--text-xs); overflow-wrap: anywhere; }
+.ssh-dialog-form { margin-top: 12px; border-top: 1px solid var(--color-border); }
+.ssh-dialog-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 12px 0 0; font-size: var(--text-sm); }
+.ssh-dialog-facts dt { color: var(--color-text-tertiary); }
+.ssh-dialog-facts dd { margin: 0; color: var(--color-text-primary); overflow-wrap: anywhere; }
+.ssh-dialog-steps { margin: 6px 0 0; padding-left: 18px; color: var(--color-text-secondary); font-size: var(--text-sm); line-height: 1.6; }
+/* The command moves to its own line whole instead of breaking in the middle of a path. */
+.ssh-dialog-steps code { display: inline-block; }
+.ssh-copy-row { display: flex; gap: 8px; min-width: 0; }
+.ssh-copy-row input { flex: 1 1 auto; min-width: 0; }
+.ssh-copy-row .button-secondary { flex: none; }
+
+/* The key the person approved beside the one the server shows now. */
+.ssh-key-compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+.ssh-key-card { display: grid; align-content: start; gap: 4px; min-width: 0; padding: 9px 11px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-background-control); }
+.ssh-key-card.is-new { border-color: var(--orange-300); }
+.ssh-key-card strong { color: var(--color-text-primary); font-size: var(--text-sm); font-weight: 550; }
+.ssh-key-card span { color: var(--color-text-secondary); font-size: var(--text-xs); }
+.ssh-key-card code { padding: 0; background: none; color: var(--color-text-primary); }
+.ssh-key-card small { color: var(--color-text-tertiary); font-size: var(--text-xs); line-height: 1.4; }
+
+@media (max-width: 560px) {
+  .ssh-host-head { flex-wrap: wrap; }
+  .ssh-key-compare { grid-template-columns: minmax(0, 1fr); }
+}

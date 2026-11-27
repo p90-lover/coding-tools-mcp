@@ -97,6 +97,10 @@ const BACKEND_MODULES = Object.freeze([
   "computer-control.cjs",
   // Runtime > App layout and the app_layout MCP tool for chat agents.
   "app-layout.cjs",
+  // The SSH hosts the person approved and their pinned host keys (main.cjs makes the store), and
+  // the rules agent-orchestrator-workflow.cjs judges an agent's ssh, scp and sftp commands by.
+  "ssh-connections.cjs",
+  "ssh-request.cjs",
 ]);
 
 function sha256File(filePath) {

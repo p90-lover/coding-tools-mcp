@@ -358,6 +358,9 @@ let cpaUpdater = null;
 let appPluginsService = null;
 // The Antigravity CLI service, made with the backend (startBackendFrom); App plugins updates it.
 let antigravityCliService = null;
+// The SSH hosts the person approved and their pinned host keys (ssh-connections.cjs), made with the
+// backend. One store at a time: a backend restart stops the old one before the new one reads the file.
+let sshConnectionsService = null;
 let externalServicesController = null;
 let managedBootstrapController = null;
 let upstreamToolController = null;
@@ -2978,7 +2981,13 @@ function registerIpc({ logger, stateStore }) {
     const passiveAoLayout = input.moduleId === "agent-orchestrator"
       && (["upstream_bounds", "upstream_hide", "chat_preview_show", "chat_preview_hide", "chat_preview_snapshot", "archived_chats", "chat_prewarm", "chat_draft"].includes(input.operation)
         || (["chat_auto_retry", "chat_model_judges", "chat_auto_compact", "chat_question_timeout"].includes(input.operation) && input.arguments?.enabled === undefined && input.arguments?.percent === undefined && input.arguments?.seconds === undefined && input.arguments?.meteredReviews === undefined && input.arguments?.autoReviewAll === undefined));
-    const readOnly = appsHost.isReadOnly(input.moduleId, input.operation);
+    // SSH hosts: only its list is a read, whatever the module's own table says. Adding a host,
+    // fetching or confirming a host key and removing a host run only from the focused window. The
+    // host trims the id and also takes the whole call as one object in its place, so the module and
+    // the operation are read here the way the host reads them.
+    const called = input.moduleId && typeof input.moduleId === "object" && !Array.isArray(input.moduleId) ? input.moduleId : input;
+    const sshHostsChange = String(called.moduleId || called.handle || "").trim() === "ssh-connections" && called.operation !== "list";
+    const readOnly = !sshHostsChange && appsHost.isReadOnly(input.moduleId, input.operation);
     // These two status clocks also run while minimized. Only the trusted main frame may read them.
     const backgroundRead = readOnly && input.moduleId === "agent-orchestrator"
       && ["run_status", "subagents_runs"].includes(input.operation);
@@ -5157,6 +5166,7 @@ async function start() {
     const { createAgentOrchestratorUpstream } = backendBundles.requireModule(backend, "agent-orchestrator-upstream.cjs");
     const { createChangePulse, createRunChangeFilter } = backendBundles.requireModule(backend, "ao-session-events.cjs");
     const { createAgentOrchestratorWorkflow, resolveAoNativeConnection, aoWebCatalogForModel, findInstalledCodexExecutable } = backendBundles.requireModule(backend, "agent-orchestrator-workflow.cjs");
+    const { createSshConnections } = backendBundles.requireModule(backend, "ssh-connections.cjs");
     const { HeadlessHost } = backendBundles.requireModule(backend, "headless-host.cjs");
     const aoDataRoot = process.env.CODING_TOOLS_AO_DATA_DIR
       ? path.resolve(process.env.CODING_TOOLS_AO_DATA_DIR)
@@ -5556,9 +5566,26 @@ async function start() {
       return upstreamAtLaunch.start();
     }).catch((error) => logger.warn("ao.surviving_chats_failed", { detail: String(error?.message ?? error).slice(0, 300) }));
     missionWorkflowRuntime?.dispose();
+    // Connections > SSH hosts: the hosts the person approved, each with the host key they confirmed
+    // (ssh-connections.cjs). Only the hosts page changes it, from the focused window (the
+    // coding-tools:apps:call handler); agents never reach it. The store a backend restart replaces
+    // refuses further changes, and this one reads the file only after that one's last write has
+    // landed (`after`).
+    const sshConnections = createSshConnections({
+      file: path.join(app.getPath("userData"), "integrations", "ssh-hosts.json"),
+      // Written whole from the pinned hosts on every change and at start; ssh only reads it.
+      knownHostsFile: path.join(app.getPath("userData"), "integrations", "ssh-known-hosts"),
+      // Each key fetch writes into a throwaway folder here, read once and removed.
+      probeDir: path.join(app.getPath("userData"), "integrations", "ssh-probe"),
+      after: sshConnectionsService?.dispose(),
+      logger,
+    });
+    sshConnectionsService = sshConnections;
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
       findCodexExecutable: () => codexCli.executable() || findInstalledCodexExecutable?.() || null,
       nativeGuardianReview,
+      // The only hosts an agent's ssh, scp or sftp command may be reviewed for: pinned ones.
+      sshApprovedHosts: () => sshConnections.approvedHosts(),
       handoffRedactionEnabled: () => stateStore.read().chatAgentRedactSecrets === true,
       // Stop agents that sat idle for a while; their chats resume them on the next message.
       releaseIdleAgents: true,
@@ -5663,6 +5690,7 @@ async function start() {
         agentOrchestrator: (operation, args) => agentOrchestratorWorkflow.call(operation, args),
         agentOrchestratorUpstream: (operation, args) => agentOrchestratorUpstream.call(operation, args),
         antigravityCli: antigravityCall,
+        sshConnections: (operation, args) => sshConnections.call(operation, args),
         start: (id) => externalServicesController.start(id),
         stop: (id) => externalServicesController.stop(id),
         restart: (id) => externalServicesController.restart(id),

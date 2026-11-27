@@ -28,6 +28,7 @@ const LIFECYCLE = Object.freeze([
 const EXPECTED_OPS = Object.freeze({
   "agent-orchestrator": ["inspect", "board", "runs", "update_run"],
   "antigravity-cli": ["inspect", "status", "install", "terminal_open", "terminal_close", "refresh", "sign_in", "sweep", "set_auto"],
+  "ssh-connections": ["inspect", "list", "add", "update", "remove", "fetch_key", "confirm_key"],
   cpa: [
     ...LIFECYCLE,
     "health",
@@ -541,9 +542,9 @@ test("AO apps.call reaches the host while retired IDs fail before dispatch", asy
   assert.deepEqual(dispatched, [], "no retired handler may run, even if registered");
 });
 
-test("app catalog and registry expose only CPA, AO and the Antigravity CLI tool", () => {
+test("app catalog and registry expose only CPA, AO, the Antigravity CLI tool and the SSH hosts", () => {
   const host = createCodingToolsAppsHost();
-  assert.deepEqual(host.moduleIds, ["cpa", "agent-orchestrator", "antigravity-cli"]);
+  assert.deepEqual(host.moduleIds, ["cpa", "agent-orchestrator", "antigravity-cli", "ssh-connections"]);
   assert.deepEqual(host.list().modules.map((entry) => entry.id), host.moduleIds);
   assert.deepEqual(host.catalog().modules.map((entry) => entry.id), host.moduleIds);
   assert.deepEqual(defaultRegistry.ids().sort(), [...host.moduleIds].sort());
