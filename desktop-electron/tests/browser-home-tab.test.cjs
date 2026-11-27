@@ -19,7 +19,9 @@ class FakeView {
 vm.runInNewContext(fs.readFileSync(filename, "utf8"), {
   module: moduleForTest, exports: moduleForTest.exports, process, Buffer, URL,
   setTimeout, clearTimeout, setInterval, clearInterval, console,
-  require: name => name === "electron" ? { WebContentsView: FakeView } : localRequire(name),
+  // browser-host.cjs takes Electron's services from the registered host (electron/host/current.cjs),
+  // so the stand-in view arrives as the host's.
+  require: name => name === "./host/current.cjs" ? { currentHost: () => ({ WebContentsView: FakeView }) } : localRequire(name),
 }, { filename });
 const { BrowserHost, IDLE_BROWSER_URL } = moduleForTest.exports;
 

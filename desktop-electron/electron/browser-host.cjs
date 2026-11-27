@@ -1,9 +1,10 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomBytes } = require("node:crypto");
-const { WebContentsView } = require("electron");
-// Desktop services through the host interface (docs/specs/electron-host-seam): null under plain Node.
-const { clipboard, powerMonitor, powerSaveBlocker, shell } = require("./host/electron-host.cjs").createElectronHost(require("electron"));
+// Electron's services come from the host the app registered (docs/specs/electron-host-seam-panes),
+// asked for when used: this file loads no Electron, and the WebView2 host needs no change here.
+const { currentHost } = require("./host/current.cjs");
+const desktop = () => currentHost();
 const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { conversationPatchScript } = require("./chatgpt-conversation-actions.cjs");
 const { blockChatGptTelemetry } = require("./chatgpt-telemetry-block.cjs");
@@ -731,7 +732,7 @@ class BrowserHost {
     // A browser key the toolbar answers (Ctrl+L, Alt+D, F6: "focus-address"), sent to the renderer.
     publishShortcut = null,
     showWindow = () => {},
-    clipboardApi = clipboard,
+    clipboardApi = desktop().clipboard,
     getBrowserInteractionMode = () => "automatic",
     // Task chats are saved by default: ChatGPT refuses connectors in Temporary Chat.
     getUseSavedChats = () => true,
@@ -826,6 +827,7 @@ class BrowserHost {
     this.turnLeaseSweep = setInterval(() => this.reapExpiredTurnTabs(), TURN_HEARTBEAT_SWEEP_MS);
     this.turnLeaseSweep.unref?.();
     this.resumeListener = () => this.refreshTurnLeases("system_resume");
+    const powerMonitor = desktop().powerMonitor;
     if (powerMonitor && typeof powerMonitor.on === "function") {
       powerMonitor.on("resume", this.resumeListener);
     } else {
@@ -873,7 +875,7 @@ class BrowserHost {
 
   // One account's home page. The shown account's is `this.view`; the others wait in parkedHomes.
   createHomeView(partition) {
-    const view = new WebContentsView({
+    const view = new (desktop().WebContentsView)({
       webPreferences: {
         partition,
         contextIsolation: true,
@@ -1219,7 +1221,7 @@ class BrowserHost {
     const ordinal = Array.from({ length: MAX_TOTAL_BROWSER_TABS }, (_unused, index) => index + 1)
       .find(candidate => ![...this.turnTabs.values(), ...(this.userTabs?.values() ?? [])].some(tab => tab.ordinal === candidate));
     if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
-    const view = new WebContentsView({
+    const view = new (desktop().WebContentsView)({
       webPreferences: {
         partition,
         contextIsolation: true,
@@ -1321,7 +1323,7 @@ class BrowserHost {
       .find(candidate => ![...this.turnTabs.values(), ...this.userTabs.values()]
         .some(tab => tab.ordinal === candidate));
     if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
-    const view = new WebContentsView({
+    const view = new (desktop().WebContentsView)({
       webPreferences: {
         partition: this.partition,
         contextIsolation: true,
@@ -1377,7 +1379,7 @@ class BrowserHost {
     const ordinal = Array.from({ length: MAX_TOTAL_BROWSER_TABS }, (_unused, index) => index + 1)
       .find(candidate => ![...this.turnTabs.values(), ...(this.userTabs?.values() ?? [])].some(tab => tab.ordinal === candidate));
     if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
-    const view = new WebContentsView({
+    const view = new (desktop().WebContentsView)({
       webPreferences: {
         partition: this.partition,
         contextIsolation: true,
@@ -1588,7 +1590,7 @@ class BrowserHost {
       }
       let parsed;
       try { parsed = new URL(url); } catch { return { action: "deny" }; }
-      if (parsed.protocol === "https:" || parsed.protocol === "http:") void shell.openExternal(parsed.toString()).catch(() => undefined);
+      if (parsed.protocol === "https:" || parsed.protocol === "http:") void desktop().shell.openExternal(parsed.toString()).catch(() => undefined);
       return { action: "deny" };
     });
     const blockAuthenticationNavigation = (event, url) => {
@@ -1746,7 +1748,7 @@ class BrowserHost {
       let parsed;
       try { parsed = new URL(url); } catch { return { action: "deny" }; }
       if (parsed.protocol === "https:" || parsed.protocol === "http:") {
-        void shell.openExternal(parsed.toString()).catch((error) => {
+        void desktop().shell.openExternal(parsed.toString()).catch((error) => {
           this.logger.warn("browser.user_tab_external_url_failed", {
             tabId: tab.id, errorType: error?.name || "Error",
           });
@@ -1828,7 +1830,7 @@ class BrowserHost {
       let parsed;
       try { parsed = new URL(url); } catch { return { action: "deny" }; }
       if (parsed.protocol === "https:" || parsed.protocol === "http:") {
-        void shell.openExternal(parsed.toString()).catch((error) => {
+        void desktop().shell.openExternal(parsed.toString()).catch((error) => {
           this.logger.warn("browser.manual_external_url_failed", {
             origin: parsed.origin,
             errorType: error?.name || "Error",
@@ -1913,7 +1915,7 @@ class BrowserHost {
       let parsed;
       try { parsed = new URL(url); } catch { return { action: "deny" }; }
       if (parsed.protocol === "https:" || parsed.protocol === "http:") {
-        void shell.openExternal(parsed.toString()).catch((error) => {
+        void desktop().shell.openExternal(parsed.toString()).catch((error) => {
           const message = `Could not open the external link: ${error instanceof Error ? error.message : String(error)}`;
           this.logger.error("browser.external_url_open_failed", { url: parsed.toString(), message });
           this.setState({ status: "error", message, loading: false });
@@ -2396,8 +2398,9 @@ class BrowserHost {
   }
 
   syncPowerSaveBlocker() {
-    // Under plain Node (the launcher test harness) require("electron") exposes no APIs; the
-    // blocker is an Electron-only concern and its absence must not break lease bookkeeping.
+    // Under plain Node (the launcher test harness) the host has no sleep blocker; it is a
+    // desktop-only concern and its absence must not break lease bookkeeping.
+    const powerSaveBlocker = desktop().powerSaveBlocker;
     if (!powerSaveBlocker || typeof powerSaveBlocker.start !== "function") return;
     const wanted = shouldBlockSleepForTurns([...this.turnTabs.values()]);
     const active = this.powerSaveBlockerId !== null && powerSaveBlocker.isStarted(this.powerSaveBlockerId);
@@ -2859,7 +2862,7 @@ class BrowserHost {
 
   createAuthView(options = {}, requestedUrl = "") {
     this.closeAuthView(this.authView, true);
-    const authView = new WebContentsView({ webContents: options.webContents });
+    const authView = new (desktop().WebContentsView)({ webContents: options.webContents });
     this.authView = authView;
     this.authNavigationError = null;
     this.window.contentView.addChildView(authView);
@@ -2973,7 +2976,7 @@ class BrowserHost {
         let parsed;
         try { parsed = new URL(url); } catch { return { action: "deny" }; }
         if (parsed.protocol === "https:" || parsed.protocol === "http:") {
-          void shell.openExternal(parsed.toString()).catch((error) => {
+          void desktop().shell.openExternal(parsed.toString()).catch((error) => {
             const message = `Could not open the external link: ${error instanceof Error ? error.message : String(error)}`;
             this.logger.error("browser.external_url_open_failed", { url: parsed.toString(), message });
             this.setState({ status: "error", message, loading: false });
@@ -4844,6 +4847,7 @@ class BrowserHost {
     this.closeAuthView(this.authView, true);
     this.clearHomeNavigationTimeout();
     if (this.turnLeaseSweep) clearInterval(this.turnLeaseSweep);
+    const { powerMonitor, powerSaveBlocker } = desktop();
     if (this.resumeListener && powerMonitor && typeof powerMonitor.removeListener === "function") {
       powerMonitor.removeListener("resume", this.resumeListener);
       this.resumeListener = null;

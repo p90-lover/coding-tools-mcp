@@ -23,6 +23,12 @@ const HOST_SERVICES = Object.freeze({
   dialog: Object.freeze(["showMessageBox", "showOpenDialog", "showSaveDialog", "showErrorBox"]),
   Menu: Object.freeze(["buildFromTemplate"]),
   nativeImage: Object.freeze(["createFromPath", "createFromDataURL"]),
+  // Slice 3 (docs/specs/electron-host-seam-panes): the browser panes' sessions.
+  session: Object.freeze(["fromPartition"]),
+});
+/** Properties forwarded as read-only getters, read when the backend reads them. */
+const HOST_PROPERTIES = Object.freeze({
+  session: Object.freeze(["defaultSession"]),
 });
 /**
  * The window classes pass through as Electron's own (slice 2): their instances must stay real
@@ -34,6 +40,7 @@ const HOST_CLASSES = Object.freeze({
   BrowserWindow: Object.freeze(["fromWebContents", "getAllWindows"]),
   BaseWindow: Object.freeze([]),
   Tray: Object.freeze([]),
+  WebContentsView: Object.freeze([]),
 });
 /** The other two, which are not plain method sets: a settable property and a class. */
 const HOST_SPECIAL = Object.freeze({
@@ -45,9 +52,10 @@ const HOST_SPECIAL = Object.freeze({
  * `source`'s listed methods, each calling through to it (so `this` stays the source). Each is
  * looked up when it is read, as the callers' own `powerMonitor.on` was: some of Electron's
  * services must not be touched before the app is ready, and building the host happens at load.
- * A method the source lacks reads as undefined.
+ * A method the source lacks reads as undefined. `properties` are forwarded read-only, also read
+ * when read (Electron's `session.defaultSession`).
  */
-function pick(source, methods) {
+function pick(source, methods, properties = []) {
   if (!source || (typeof source !== "object" && typeof source !== "function")) return null;
   const picked = {};
   for (const name of methods) {
@@ -56,6 +64,7 @@ function pick(source, methods) {
       get: () => (typeof source[name] === "function" ? (...args) => source[name](...args) : undefined),
     });
   }
+  for (const name of properties) Object.defineProperty(picked, name, { enumerable: true, get: () => source[name] });
   return Object.freeze(picked);
 }
 
@@ -107,6 +116,8 @@ function createElectronHost(electron) {
     BrowserWindow: classOf(api.BrowserWindow),
     BaseWindow: classOf(api.BaseWindow),
     Tray: classOf(api.Tray),
+    session: pick(api.session, HOST_SERVICES.session, HOST_PROPERTIES.session),
+    WebContentsView: classOf(api.WebContentsView),
   });
 }
 
@@ -118,4 +129,4 @@ function classOf(Native) {
 // No shared instance: each caller builds its host from the require("electron") it loaded, as it
 // destructured Electron before. A test that reloads a module with another Electron stand-in then
 // gets that stand-in's services, not a previous one's.
-module.exports = { HOST_SERVICES, HOST_SPECIAL, HOST_CLASSES, createElectronHost };
+module.exports = { HOST_SERVICES, HOST_PROPERTIES, HOST_SPECIAL, HOST_CLASSES, createElectronHost };

@@ -6,20 +6,22 @@ const { spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
 const {
   app,
-  WebContentsView,
   ipcMain,
   net: electronNet,
-  session,
   webFrameMain,
   webContents: electronWebContents,
 } = require("electron");
-// Desktop services and windows come through the host interface (docs/specs/electron-host-seam and
-// electron-host-seam-windows): Electron's today, a WebView2 host's later. Only what the backend
-// calls is there; the window classes are Electron's own until then.
+// Desktop services, windows and browser panes come through the host interface
+// (docs/specs/electron-host-seam, -windows, -panes): Electron's today, a WebView2 host's later. Only
+// what the backend calls is there; the window and view classes are Electron's own until then. The
+// host is registered as the current one, which browser-host.cjs asks for when it needs a service.
+const runningHost = require("./host/electron-host.cjs").createElectronHost(require("electron"));
+require("./host/current.cjs").setCurrentHost(runningHost);
 const {
   clipboard, nativeTheme, Notification, safeStorage, shell, powerMonitor, powerSaveBlocker,
   BrowserWindow, BaseWindow, Tray, screen, dialog, Menu, nativeImage,
-} = require("./host/electron-host.cjs").createElectronHost(require("electron"));
+  WebContentsView, session,
+} = runningHost;
 const { BrowserHost, navigationErrorForLog, waitForManualOperation, writeRestartMarker } = require("./browser-host.cjs");
 const { createSignInRetryWait } = require("./sign-in-retry-wait.cjs");
 const { prepareBrowserDebugging } = require("./browser-debugging.cjs");
