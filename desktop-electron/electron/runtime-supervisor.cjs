@@ -37,6 +37,9 @@ const SETUP_WAIT_LABELS = {
 const TUNNEL_START_TIMEOUT_MS = 120_000;
 const TUNNEL_HEALTH_POLL_INTERVAL_MS = 1_000;
 const TUNNEL_MONITOR_INTERVAL_MS = 10_000;
+// How often the monitor may start tunnel-client for its inventory while the local health check
+// cannot tell and the tunnel's process still runs (observeTunnelForMonitor).
+const TUNNEL_INVENTORY_QUIET_MS = 5 * 60_000;
 const TUNNEL_MONITOR_FAILURE_THRESHOLD = 3;
 const TUNNEL_MCP_FAILURE_RECENCY_MS = 2 * 60_000;
 const BOOT_TIME_CLOCK_TOLERANCE_MS = 5_000;
@@ -1521,6 +1524,13 @@ class RuntimeSupervisor {
   async observeTunnelForMonitor(config) {
     const local = await this.readLocalTunnelHealth();
     if (local.statusKnown) return local;
+    // Unknown locally while the managed process still runs: the inventory (a tunnel-client start)
+    // is asked at most every TUNNEL_INVENTORY_QUIET_MS. Asked every 10 s for as long as the app ran,
+    // it was among what Bitdefender's behaviour monitor scored before quarantining the app
+    // (2026-11-27). An unknown answer is no evidence either way, so the monitor waits on it.
+    const now = Date.now();
+    if (local.processRunning === true && now - (this.lastTunnelInventoryAt ?? 0) < TUNNEL_INVENTORY_QUIET_MS) return local;
+    this.lastTunnelInventoryAt = now;
     try {
       const previousEndpoint = this.tunnelHealthBaseUrl;
       const inventory = await this.readTunnelHealth(config);
