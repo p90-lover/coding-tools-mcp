@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { getCodingToolsClient } from "../api/client";
 import type { JsonObject } from "../api/contracts";
 import { Icon } from "../icons";
+import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSurface";
 import "./ssh-connections.css";
 
 // Connections > SSH hosts (the sidebar tab): the servers the person approves for SSH, kept by the
@@ -13,6 +14,9 @@ import "./ssh-connections.css";
 // interceptor's, so nothing here approves a key by itself, no choice skips the comparison, and a
 // host whose key changed stays blocked until the person compares the new one.
 // Every value shown comes from the main process and is drawn as text only.
+// An approved host opens in the in-app terminal (milestone 2): AO runs ssh against the pinned key
+// and shows it in its remote mode, in place of the list, one terminal at a time. Its handle lives
+// in this page's memory only.
 
 export type SshKey = { type: string; fingerprint: string; pinnedAt: string | number | null; method: "pasted" | "compared" };
 export type SshCandidate = { type: string; fingerprint: string; fetchedAt: string | number | null };
@@ -23,8 +27,10 @@ export type SshHost = {
   production: boolean; state: SshHostState; key: SshKey | null; candidate: SshCandidate | null;
 };
 export type SshClient = { path: string; version: string };
-type SshOperation = "list" | "add" | "update" | "remove" | "fetch_key" | "confirm_key";
+type SshOperation = "list" | "add" | "update" | "remove" | "fetch_key" | "confirm_key" | "terminal_open" | "terminal_close";
 type AddDraft = { label: string; host: string; port: string; user: string; identityFile: string };
+/** The open terminal: AO's handle for it, and the host it belongs to as the panel names it. */
+export type SshTerminal = { handle: string; generation: string; title: string; hostId: string; label: string; address: string; production: boolean };
 
 const DIALOG_TITLE_ID = "ssh-dialog-title";
 const DIALOG_ABOUT_ID = "ssh-dialog-about";
@@ -46,7 +52,8 @@ async function call(operation: SshOperation, args?: JsonObject): Promise<Record<
   const value = outer.result as unknown;
   const result = (value && typeof value === "object" && !Array.isArray(value) ? value : {}) as Record<string, unknown>;
   if (outer.ok === false || result.ok === false) {
-    throw new Error(typeof result.error === "string" && result.error ? result.error : "That didn't go through. Try again.");
+    throw Object.assign(new Error(typeof result.error === "string" && result.error ? result.error : "That didn't go through. Try again."),
+      { code: typeof result.code === "string" ? result.code : "" });
   }
   return result;
 }
@@ -95,6 +102,35 @@ function clientOf(value: unknown): SshClient | null {
 /** user@host:port, an IPv6 address in brackets so its colons are not read as the port's. */
 export function hostAddress(host: Pick<SshHost, "host" | "port" | "user">): string {
   return `${host.user}@${host.host.includes(":") ? `[${host.host}]` : host.host}:${host.port}`;
+}
+
+/**
+ * Whether a terminal may be offered for a host: approved (a confirmed key, state "pinned") and no
+ * other entry for the same server and port says it shows another key, as the module reads it
+ * (ssh-connections.cjs `disputed`). The module checks again before it opens anything.
+ */
+export function terminalAllowed(host: SshHost, hosts: readonly SshHost[]): boolean {
+  if (host.state !== "pinned" || !host.key) return false;
+  const pinnedAt = host.key.pinnedAt === null ? Number.NaN : new Date(host.key.pinnedAt).getTime();
+  const other = (key: { type: string; fingerprint: string }) => key.type !== host.key!.type || key.fingerprint !== host.key!.fingerprint;
+  return !hosts.some((entry) => entry.host === host.host && entry.port === host.port && (
+    (entry.id !== host.id && entry.state === "pinned" && entry.key !== null && other(entry.key))
+    || (entry.candidate !== null && other(entry.candidate)
+      && !(new Date(entry.candidate.fetchedAt ?? Number.NaN).getTime() < pinnedAt))));
+}
+
+/** The terminal the module opened, or null when its answer is not one. */
+export function terminalOf(value: unknown, host: SshHost): SshTerminal | null {
+  const raw = record(value);
+  if (!raw || typeof raw.handle !== "string" || !/^[\w:.-]{1,200}$/.test(raw.handle)) return null;
+  return {
+    handle: raw.handle,
+    generation: typeof raw.generation === "string" && raw.generation ? raw.generation : raw.handle,
+    title: typeof raw.title === "string" && raw.title ? raw.title : host.label,
+    hostId: host.id, label: host.label, address: hostAddress(host),
+    // The tag shows when either says production: a missing answer never hides it.
+    production: raw.production === true || host.production,
+  };
 }
 
 /** The badge a host shows, in the app's chip tones. */
@@ -248,6 +284,18 @@ export function SshConnectionsSurface({ active, setError }: {
   // open dialog came from, first choice first: the focus goes back there when it closes.
   const openers = useRef<Record<string, HTMLButtonElement>>({});
   const openedFrom = useRef<string[]>([]);
+  // The in-app terminal in front of the list, and why closing it failed. One at a time, in this
+  // page's memory only: nothing about it is saved.
+  const [terminal, setTerminal] = useState<SshTerminal | null>(null);
+  const [closeError, setCloseError] = useState("");
+  // A terminal still open when the page itself goes away (a reload, a crash of the page) is closed
+  // with it: nothing on screen could reach it again, and the SSH session would run on unseen.
+  const openHandle = useRef<string | null>(null);
+  openHandle.current = terminal?.handle ?? null;
+  useEffect(() => () => {
+    const handle = openHandle.current;
+    if (handle) void call("terminal_close", { handle }).catch(() => undefined);
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -434,6 +482,64 @@ export function SshConnectionsSurface({ active, setError }: {
     }
   };
 
+  /**
+   * Opens the in-app terminal to an approved host. The module checks the host again, writes the
+   * pinned keys file and has AO start ssh; the terminal then shows in place of the list. A refusal
+   * shows on the host's row, in the module's words.
+   */
+  const openTerminal = async (host: SshHost) => {
+    if (busy || dialogOpen || terminal || !terminalAllowed(host, hosts ?? [])) return;
+    setBusy(`open:${host.id}`);
+    setNote(host.id, null);
+    try {
+      const result = await call("terminal_open", { id: host.id });
+      const opened = terminalOf(result.terminal, host);
+      if (!opened) throw new Error("The terminal could not be opened. Try again.");
+      setCloseError("");
+      // When the panel gives way to the list again, the focus goes back to this row.
+      openedFrom.current = [`terminal:${host.id}`, `check:${host.id}`];
+      setTerminal(opened);
+    } catch (cause) {
+      setNote(host.id, { ok: false, text: reasonOf(cause) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /**
+   * Closes the terminal and shows the list again. A close that failed keeps the terminal on screen
+   * with the reason, so it can be tried again; one the module does not know (the app's backend
+   * restarted since) goes back to the list and says so on the host's row.
+   */
+  const closeTerminal = async () => {
+    if (!terminal || busy) return;
+    const { handle, hostId } = terminal;
+    setBusy("close");
+    setCloseError("");
+    try {
+      await call("terminal_close", { handle });
+      setTerminal(null);
+    } catch (cause) {
+      if ((cause as { code?: unknown }).code === "not_own") {
+        setTerminal(null);
+        setNote(hostId, { ok: false, text: reasonOf(cause) });
+      } else setCloseError(reasonOf(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // The panel gave way to the list (Close terminal, or a terminal the module no longer knows): once
+  // the page is on screen, the focus goes back to that row's Open terminal button, as it goes back
+  // to a dialog's button when the dialog closes.
+  const panelShown = useRef(false);
+  useEffect(() => {
+    if (terminal) { panelShown.current = true; return; }
+    if (!panelShown.current || !active) return;
+    panelShown.current = false;
+    returnFocus()?.focus();
+  }, [terminal, active]);
+
   const copiedHere = () => { ownCopy.current = true; };
   const copy = (value: string) => void navigator.clipboard.writeText(value).then(
     () => { copiedHere(); setCopied(true); window.setTimeout(() => setCopied(false), 1500); },
@@ -484,6 +590,10 @@ export function SshConnectionsSurface({ active, setError }: {
           </div>
           <span className={`app-plugin-chip ssh-host-state is-${badge.tone}`}>{badge.text}</span>
           <div className="ssh-host-actions">
+            {terminalAllowed(host, hosts ?? [])
+              ? <button className="button-primary" disabled={working || !client} onClick={() => void openTerminal(host)} ref={opener(`terminal:${host.id}`)} type="button">
+                {busy === `open:${host.id}` ? "Opening…" : "Open terminal"}
+              </button> : null}
             {host.state === "changed" && host.candidate
               ? <button className="button-primary" disabled={working} onClick={() => reviewChange(host)} ref={opener(`review:${host.id}`)} type="button">Review key change</button> : null}
             <button className={host.state === "draft" ? "button-primary" : "button-secondary"} disabled={working || !client}
@@ -509,6 +619,30 @@ export function SshConnectionsSurface({ active, setError }: {
       </div>
     );
   };
+
+  // The open terminal, in place of the list. AO draws it in a native view over this panel, in its
+  // remote mode; the view steps aside on its own while this tab is hidden or something covers it.
+  if (terminal) {
+    return <section aria-label="SSH hosts" className="content-surface ssh-connections">
+      <div aria-label={`SSH terminal: ${terminal.label}`} className="ssh-terminal" role="group">
+        <header className="ssh-terminal-bar">
+          <div className="ssh-host-name">
+            <strong>{terminal.label}</strong>
+            <span className="ssh-host-address">{terminal.address}</span>
+          </div>
+          {terminal.production ? <span className="app-plugin-chip ssh-host-state is-error">Production</span> : null}
+          <button className="button-secondary" disabled={busy === "close"} onClick={() => void closeTerminal()} type="button">
+            {busy === "close" ? "Closing…" : "Close terminal"}
+          </button>
+        </header>
+        {closeError ? <p className="app-plugin-detail is-error" role="alert">{closeError}</p> : null}
+        <div className="ssh-terminal-view">
+          <AgentOrchestratorOriginalSurface hostbar={false} openMissions={() => undefined}
+            terminal={{ handle: terminal.handle, generation: terminal.generation, title: terminal.title, remote: true }} />
+        </div>
+      </div>
+    </section>;
+  }
 
   return <section aria-label="SSH hosts" className="content-surface ssh-connections">
     <div className="content-scroll is-narrow">

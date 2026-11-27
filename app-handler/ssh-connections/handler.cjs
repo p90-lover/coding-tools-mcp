@@ -5,7 +5,8 @@
 // only names its operations for the app window.
 //
 // "list" is the only read. Every other operation decides which servers agents may reach or which
-// host key is trusted, so the app's focus guard asks for the focused window before it runs
+// host key is trusted, or opens or closes an SSH session, so the app's focus guard asks for the
+// focused window before it runs
 // ("inspect" changes nothing, and is held to the same rule so that the table has one exception),
 // and no agent-facing tool reaches this module at all (coding-tools-apps-mcp.cjs leaves it out).
 const SPECS = Object.freeze({
@@ -16,6 +17,9 @@ const SPECS = Object.freeze({
   remove: { readOnly: false, description: "Remove an SSH host and its pinned host key." },
   fetch_key: { readOnly: false, description: "Ask the server for its host key and show it to the person. The key is not trusted." },
   confirm_key: { readOnly: false, description: "Pin the fetched host key after the person compared or pasted its fingerprint." },
+  // The in-app terminal (milestone 2). Each opens or closes a live SSH session, so neither is a read.
+  terminal_open: { readOnly: false, description: "Open the in-app SSH terminal to an approved host, with its pinned host key." },
+  terminal_close: { readOnly: false, description: "Close an in-app SSH terminal this page opened." },
 });
 
 module.exports = Object.freeze({

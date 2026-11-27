@@ -422,7 +422,7 @@ test("Register native page detaches for launcher reload and crash without stoppi
   const file = ts.createSourceFile("main.cjs", electronMain, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   const functions = file.statements.filter(ts.isFunctionDeclaration);
   const sourceOf = (name) => functions.find((node) => node.name?.text === name).getText(file);
-  const callbacks = new Map(), calls = [], recovered = [];
+  const callbacks = new Map(), calls = [], recovered = [], sshCloses = [];
   const collect = (node) => {
     if (ts.isCallExpression(node) && node.expression.getText(file) === "window.webContents.on"
       && ["did-start-navigation", "render-process-gone"].includes(node.arguments[0]?.text)) {
@@ -437,6 +437,8 @@ test("Register native page detaches for launcher reload and crash without stoppi
     logger: { warn() {} }, quitting: false, rendererCrashes: [], setTimeout() {},
     // The crash path and renderer-watchdog.cjs share one recovery (reload, or restart after three).
     recoverRenderer: (reason) => recovered.push(reason),
+    // The SSH hosts page's terminal goes with its page (ssh-connections.test.cjs tests the rest).
+    sshConnectionsService: { closeAll: async (reason) => { sshCloses.push(reason); } },
   };
   const load = vm.runInNewContext("(" + sourceOf("loadRenderer") + ")", scope);
   await load(window);
@@ -465,6 +467,8 @@ test("Register native page detaches for launcher reload and crash without stoppi
   assert.deepEqual(recovered, ["gone"], "and the page is recovered");
   crashed({}, { reason: "clean-exit", exitCode: 0 });
   assert.deepEqual(recovered, ["gone"], "a renderer that closed cleanly is not reloaded");
+  // The SSH hosts page's terminal: closed on the main-document navigation and on each renderer loss, never on an SPA route change.
+  assert.deepEqual(sshCloses, ["navigation", "renderer_gone", "renderer_gone"]);
 });
 
 test("In-Process Apps shows only CPA/AO and refuses a stale retired selection", async () => {

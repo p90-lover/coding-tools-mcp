@@ -25,7 +25,9 @@ test.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
 
 const PROGRAM = "C:\\Windows\\System32\\OpenSSH\\ssh.exe";
 const CLIENT = { version: "OpenSSH_for_Windows_9.5p2", major: 9, minor: 5 };
-const WRITE_OPERATIONS = ["add", "update", "remove", "fetch_key", "confirm_key"];
+// Every operation but list changes something: the list, a trusted key, or a live SSH session
+// (terminal_open and terminal_close, milestone 2).
+const WRITE_OPERATIONS = ["add", "update", "remove", "fetch_key", "confirm_key", "terminal_open", "terminal_close"];
 
 /** A well-formed ssh-ed25519 public key blob (base64), different for each seed. Not a real server's key. */
 function keyBlob(seed, type = "ssh-ed25519") {
@@ -988,10 +990,11 @@ test("the terminal's command is built only for a pinned host, after the pinned f
   const blocked = await store.terminalCommand({ id: host.id });
   assert.deepEqual([blocked.ok, blocked.code, blocked.argv], [false, "not_pinned", undefined]);
   assert.match((await store.terminalCommand({ id: host.id, command: "id" })).error, /no extra options or arguments/);
-  // The window cannot ask for a command line: this is not an operation of the app module.
+  // The window cannot ask for a command line: this is not an operation of the app module. Its
+  // terminal operations (milestone 2) open and close an AO terminal and hand back only its handle.
   assert.match((await store.call("terminal_command", { id: host.id })).error, /no such action/);
   assert.match((await store.call("terminalCommand", { id: host.id })).error, /no such action/);
-  assert.equal(ssh.OPERATIONS.some((name) => /terminal/.test(name)), false);
+  assert.deepEqual(ssh.OPERATIONS.filter((name) => /terminal/.test(name)), ["terminal_open", "terminal_close"]);
 });
 
 test("the terminal's command comes with its environment, and is not built for a key file that is gone", async () => {
@@ -1019,6 +1022,339 @@ test("the terminal's command comes with its environment, and is not built for a 
   // A host with no key file needs none.
   const plain = await pinnedHost(context, keyBlob("no key file"), { ...HOST, host: "plain.example.com" });
   assert.equal((await context.store.terminalCommand({ id: plain.id })).ok, true);
+});
+
+// ---------------------------------------------------------------------------------------------
+// The in-app terminal (milestone 2): terminal_open and terminal_close
+
+/**
+ * A store wired to a stand-in for AO's terminal (the upstream's openSshTerminal and closeTerminal).
+ * It records each call and what the pinned file held when AO was asked; `behaviour.open` and
+ * `behaviour.close` answer in its place when set.
+ */
+function withAo(options = {}) {
+  const ao = { opened: [], closed: [] };
+  const behaviour = { open: null, close: null };
+  let count = 0;
+  const context = makeStore({
+    ...options,
+    openTerminal: async (fields) => {
+      ao.opened.push({ fields: JSON.parse(JSON.stringify(fields)), pinned: pinnedLines(context.knownHostsFile) });
+      if (behaviour.open) return behaviour.open(fields);
+      count += 1;
+      return { handle: `shellterm-ssh-${count}`, generation: `2026-11-27T10:00:0${count}Z`, title: fields.title };
+    },
+    closeTerminal: async (handle) => {
+      ao.closed.push(handle);
+      if (behaviour.close) return behaviour.close(handle);
+      return undefined;
+    },
+  });
+  return Object.assign(context, { ao, behaviour });
+}
+
+/** Each terminal log line names an event, a host id and a short code, and nothing of the host. */
+function assertTerminalLogs(logs, forbidden) {
+  const lines = logs.filter((entry) => /^ssh\.terminal_/.test(entry[1]));
+  assert.ok(lines.length > 0);
+  for (const [level, event, fields, ...rest] of lines) {
+    assert.ok(["info", "warn"].includes(level), event);
+    assert.ok(["ssh.terminal_opened", "ssh.terminal_closed", "ssh.terminal_refused", "ssh.terminal_close_failed"].includes(event), event);
+    assert.deepEqual(rest, [], `${event} logs one object of fields`);
+    assert.ok(Object.keys(fields).every((name) => ["hostId", "code"].includes(name)), `${event}: ${Object.keys(fields)}`);
+    const text = JSON.stringify(fields);
+    for (const secret of forbidden) assert.equal(text.includes(secret), false, `${event} must not log ${JSON.stringify(secret)}: ${text}`);
+    for (const [name, value] of Object.entries(fields)) {
+      assert.ok(typeof value === "string" && /^[A-Za-z0-9_]{1,24}$/.test(value), `${event}.${name} is an id or a code: ${JSON.stringify(value)}`);
+    }
+  }
+  return lines;
+}
+
+test("terminal_open opens an approved host in AO's terminal after the pinned file is written again, and terminal_close closes only its own", async () => {
+  const blob = keyBlob("terminal open");
+  const context = withAo();
+  const { store, ao, behaviour, logs } = context;
+  const keyFile = path.join(context.root, "keys", "id_ed25519");
+  const host = await pinnedHost(context, blob, { ...HOST, port: 2222, identityFile: keyFile, production: true });
+
+  // Between two changes a line planted in the pinned file would be a second key ssh accepts for the host.
+  fs.appendFileSync(context.knownHostsFile, `[example.com]:2222 ssh-ed25519 ${keyBlob("planted")}\n`);
+  const answer = await store.call("terminal_open", { id: host.id });
+  assert.equal(answer.ok, true, answer.error);
+  assert.deepEqual(answer, { ok: true, terminal: {
+    handle: "shellterm-ssh-1", generation: "2026-11-27T10:00:01Z", title: "Build server", remote: true, hostId: host.id, production: true,
+  } });
+  assert.deepEqual(ao.opened, [{
+    fields: { host: "example.com", port: 2222, user: "deploy", identityFile: keyFile, title: "Build server", client: { major: 9, minor: 5 } },
+    pinned: [`[example.com]:2222 ssh-ed25519 ${blob}`],
+  }], "AO gets the typed fields only, and the planted line was gone before it was asked");
+  assert.deepEqual(Object.keys(ao.opened[0].fields), ["host", "port", "user", "identityFile", "title", "client"]);
+  // The window gets a handle to show: no command line, no path, no key.
+  const shown = JSON.stringify(answer);
+  for (const hidden of [keyFile, context.knownHostsFile, "UserKnownHostsFile", "\"-o\"", PROGRAM, blob, "SHA256:", "argv"]) {
+    assert.equal(shown.includes(hidden), false, hidden);
+  }
+
+  // One terminal at a time: another open is refused while this one is open, for any host.
+  const long = "L".repeat(60);
+  const plain = await pinnedHost(context, keyBlob("plain"), { label: long, host: "plain.example.com", port: 22, user: "deploy" });
+  for (const id of [host.id, plain.id]) {
+    const refused = await store.call("terminal_open", { id });
+    assert.deepEqual(refused, { ok: false, error: "A terminal is already open from this page. Close it first, then open another.", code: "already_open" });
+  }
+  assert.equal(ao.opened.length, 1, "AO was not asked again");
+
+  // Closing: only a terminal this store opened, and each once. Then another can open.
+  assert.deepEqual(await store.call("terminal_close", { handle: "shellterm-ssh-1" }), { ok: true });
+  assert.deepEqual(ao.closed, ["shellterm-ssh-1"]);
+
+  // No key file: none is sent. The label is the title (at most 60 characters, under AO's 80).
+  const second = await store.call("terminal_open", { id: plain.id });
+  assert.equal(second.ok, true, second.error);
+  assert.deepEqual(ao.opened[1].fields, { host: "plain.example.com", port: 22, user: "deploy", identityFile: null, title: long, client: { major: 9, minor: 5 } });
+  assert.deepEqual([second.terminal.title, second.terminal.production, second.terminal.remote], [long, false, true]);
+
+  for (const args of [{ handle: "shellterm-ssh-1" }, { handle: "shellterm-1" }, { handle: "shellterm-ssh-9" }, { handle: "" }, { handle: "__proto__" },
+    { handle: "constructor" }, { handle: 7 }, { handle: null }, {}, undefined]) {
+    const refused = await store.call("terminal_close", args);
+    assert.deepEqual([refused.ok, refused.code], [false, "not_own"], JSON.stringify(args));
+    assert.equal(refused.error, "This terminal was not opened from the SSH hosts page, so it was not closed here.");
+  }
+  assert.deepEqual(ao.closed, ["shellterm-ssh-1"], "AO was not asked to close any other terminal");
+
+  // A close AO failed keeps the terminal, to be tried again; one AO no longer has is closed.
+  behaviour.close = async () => { throw Object.assign(new Error("AO daemon unavailable"), { status: 502 }); };
+  const failed = await store.call("terminal_close", { handle: "shellterm-ssh-2" });
+  assert.deepEqual(failed, { ok: false, error: "The terminal could not be closed. Try again.", code: "close_failed" });
+  behaviour.close = async () => { throw Object.assign(new Error("No such terminal (SHELL_TERMINAL_NOT_FOUND)"), { status: 404, code: "SHELL_TERMINAL_NOT_FOUND" }); };
+  assert.deepEqual(await store.call("terminal_close", { handle: "shellterm-ssh-2" }), { ok: true });
+  assert.equal((await store.call("terminal_close", { handle: "shellterm-ssh-2" })).code, "not_own");
+  assert.deepEqual(ao.closed, ["shellterm-ssh-1", "shellterm-ssh-2", "shellterm-ssh-2"]);
+
+  const lines = assertTerminalLogs(logs, [scratch, "example.com", "deploy", "Build server", long, keyFile, "ssh-known-hosts", "shellterm", "UserKnownHostsFile", PROGRAM, blob]);
+  assert.deepEqual(lines.map((entry) => [entry[1], entry[2]]), [
+    ["ssh.terminal_opened", { hostId: host.id }], ["ssh.terminal_refused", { code: "already_open" }], ["ssh.terminal_refused", { code: "already_open" }],
+    ["ssh.terminal_closed", { hostId: host.id }], ["ssh.terminal_opened", { hostId: plain.id }],
+    ...Array(10).fill(["ssh.terminal_refused", { code: "not_own" }]),
+    ["ssh.terminal_refused", { hostId: plain.id, code: "close_failed" }], ["ssh.terminal_closed", { hostId: plain.id }], ["ssh.terminal_refused", { code: "not_own" }],
+  ]);
+});
+
+test("terminal_open refuses a host that is not approved with terminalCommand's codes, and AO is asked nothing", async () => {
+  const present = new Set();
+  const context = withAo({ fileExists: async (file) => present.has(file) });
+  const { store, fake, clock, ao, logs } = context;
+  const keyFile = path.join(context.root, "keys", "id_gone");
+  present.add(keyFile);
+  const withKey = await pinnedHost(context, keyBlob("key file"), { ...HOST, label: "With key", host: "key.example.com", identityFile: keyFile });
+  const draft = (await store.add({ ...HOST, label: "Draft", host: "draft.example.com" })).host;
+  const blocked = await pinnedHost(context, keyBlob("blocked"), { ...HOST, label: "Blocked", host: "blocked.example.com" });
+  const sibling = await pinnedHost(context, keyBlob("blocked"), { ...HOST, label: "Blocked as root", host: "blocked.example.com", user: "root" });
+  clock.advance(60_000);
+  fake.answer(serverShows(keyBlob("someone else"), "blocked.example.com"));
+  assert.equal((await store.fetchKey({ id: blocked.id })).host.state, "changed");
+
+  const refusal = async (id) => { const answer = await store.call("terminal_open", { id }); assert.equal(answer.ok, false, id); return answer; };
+  for (const id of [draft.id, blocked.id, sibling.id]) {
+    const answer = await refusal(id);
+    assert.equal(answer.code, "not_pinned", id);
+    assert.match(answer.error, /Confirm this host's key before opening a terminal/);
+  }
+  assert.equal((await refusal("000000000000")).code, "not_found");
+  assert.equal((await refusal("evil.example.com")).code, "not_found");
+  present.delete(keyFile);
+  const gone = await refusal(withKey.id);
+  assert.equal(gone.code, "key_file_missing");
+  assert.match(gone.error, /^Key file: no file was found at that path, so the terminal was not opened\./);
+  present.add(keyFile);
+
+  // The pinned file cannot be written: nothing opens against an old one.
+  fs.rmSync(context.knownHostsFile);
+  fs.mkdirSync(path.join(context.knownHostsFile, "in the way"), { recursive: true });
+  const unwritten = await refusal(withKey.id);
+  assert.deepEqual([unwritten.code, unwritten.error], ["pinned_write_failed", "The pinned keys file could not be written, so the terminal was not opened. Try again."]);
+  assert.deepEqual(ao.opened, [], "AO was asked nothing");
+
+  // No ssh client on this computer.
+  const noClient = withAo({ run: async () => { throw new Error("spawn ENOENT"); } });
+  const record = (await noClient.store.add(HOST)).host;
+  const missing = await noClient.store.call("terminal_open", { id: record.id });
+  assert.deepEqual([missing.ok, missing.code], [false, "no_client"]);
+  assert.equal(missing.error, "OpenSSH was not found on this computer, so the terminal was not opened.");
+  assert.deepEqual(noClient.ao.opened, []);
+
+  // A store made without AO's terminal (the default) opens nothing and says so; so does a stopped one.
+  const unwired = makeStore();
+  const lone = await pinnedHost(unwired, keyBlob("unwired"));
+  const none = await unwired.store.call("terminal_open", { id: lone.id });
+  assert.deepEqual(none, { ok: false, error: "The in-app terminal is not available right now. Try again in a moment.", code: "no_terminal" });
+  assert.equal((await unwired.store.call("terminal_close", { handle: "shellterm-ssh-1" })).code, "not_own");
+  const stopped = withAo();
+  const later = await pinnedHost(stopped, keyBlob("stopped"));
+  await stopped.store.dispose();
+  assert.equal((await stopped.store.call("terminal_open", { id: later.id })).code, "restarting");
+  assert.deepEqual(stopped.ao.opened, []);
+
+  const lines = assertTerminalLogs(logs, [scratch, "example.com", "deploy", "evil", keyFile, "ssh-known-hosts", "Draft", "Blocked"]);
+  assert.deepEqual(lines.map((entry) => entry[2].code), ["not_pinned", "not_pinned", "not_pinned", "not_found", "not_found", "key_file_missing", "pinned_write_failed"]);
+  assert.deepEqual(lines.slice(3, 5).map((entry) => entry[2]), [{ code: "not_found" }, { code: "not_found" }], "an id that is not in the list is not logged");
+});
+
+test("AO's refusals are said in the module's words, and an answer that is no terminal opens nothing", async () => {
+  const context = withAo();
+  const { store, ao, behaviour, logs } = context;
+  const host = await pinnedHost(context, keyBlob("refused"));
+  for (const [code, mine, words] of [
+    ["SSH_TERMINAL_DISABLED", "terminal_off", "Agent Orchestrator has SSH terminals switched off, so the terminal was not opened. Restart the app, then try again."],
+    ["SSH_TERMINAL_FORBIDDEN", "refused", "Agent Orchestrator refused to open the terminal. Restart the app, then try again."],
+    ["SSH_TERMINAL_LOCAL_ONLY", "refused", "Agent Orchestrator refused to open the terminal. Restart the app, then try again."],
+    ["SSH_TERMINAL_INVALID", "invalid", "Agent Orchestrator did not accept this host's details, so the terminal was not opened. Remove this host and add it again."],
+    ["SSH_TERMINAL_NO_PINNED_KEYS", "pinned_missing", "The pinned keys file was not found, so the terminal was not opened. Try again."],
+    ["SSH_TERMINAL_NO_CLIENT", "no_client", "OpenSSH was not found on this computer, so the terminal was not opened."],
+    // AO could not start ssh for it: its own sentence, not the "still starting" one.
+    ["SSH_TERMINAL_START_FAILED", "start_failed", "OpenSSH could not be started for this host, so the terminal was not opened. Try again, or check the host's details."],
+    ["ECONNREFUSED", "open_failed", "The terminal could not be opened. Agent Orchestrator may still be starting; try again in a moment."],
+    [undefined, "open_failed", "The terminal could not be opened. Agent Orchestrator may still be starting; try again in a moment."],
+  ]) {
+    behaviour.open = async () => { throw Object.assign(new Error(`AO said: secret detail about example.com and C:\\keys (${code})`), { code, status: 403 }); };
+    const answer = await store.call("terminal_open", { id: host.id });
+    assert.deepEqual(answer, { ok: false, error: words, code: mine }, String(code));
+  }
+  // An older backend whose upstream has no SSH route throws a TypeError: the same plain refusal.
+  behaviour.open = async () => { throw new TypeError("agentOrchestratorUpstream.harness.openSshTerminal is not a function"); };
+  assert.equal((await store.call("terminal_open", { id: host.id })).code, "open_failed");
+  // An answer that is not a terminal handle is not shown or kept.
+  for (const opened of [null, {}, { handle: "bad handle" }, { handle: "" }, { handle: 7 }, { handle: "x".repeat(201) }]) {
+    behaviour.open = async () => opened;
+    const answer = await store.call("terminal_open", { id: host.id });
+    assert.deepEqual([answer.ok, answer.code], [false, "open_failed"], JSON.stringify(opened));
+  }
+  assert.equal((await store.call("terminal_close", { handle: "bad handle" })).code, "not_own");
+  assert.deepEqual(ao.closed, []);
+  // A generation AO did not give is the handle.
+  behaviour.open = async () => ({ handle: "shellterm-ssh-5" });
+  assert.equal((await store.call("terminal_open", { id: host.id })).terminal.generation, "shellterm-ssh-5");
+  assert.equal(ao.opened.length, 17);
+  assertTerminalLogs(logs, [scratch, "example.com", "deploy", "secret detail", "SSH_TERMINAL", "C:\\\\keys", "shellterm", "bad handle", "AO said"]);
+});
+
+test("one terminal at a time: an open on its way holds the place too", async () => {
+  const context = withAo();
+  const { store, ao, behaviour } = context;
+  const host = await pinnedHost(context, keyBlob("one at a time"));
+  let release;
+  const going = new Promise((resolve) => { release = resolve; });
+  behaviour.open = async () => { await going; return { handle: "shellterm-ssh-slow", generation: "g" }; };
+  const first = store.call("terminal_open", { id: host.id });
+  // A double click, or the page asking again: refused while the first is on its way.
+  await new Promise(setImmediate);
+  assert.equal((await store.call("terminal_open", { id: host.id })).code, "already_open");
+  release();
+  assert.equal((await first).ok, true);
+  assert.equal((await store.call("terminal_open", { id: host.id })).code, "already_open");
+  assert.equal(ao.opened.length, 1);
+  // A refused open frees the place: the next one is asked of AO.
+  assert.deepEqual(await store.call("terminal_close", { handle: "shellterm-ssh-slow" }), { ok: true });
+  behaviour.open = async () => { throw Object.assign(new Error("no"), { code: "SSH_TERMINAL_START_FAILED" }); };
+  assert.equal((await store.call("terminal_open", { id: host.id })).code, "start_failed");
+  behaviour.open = null;
+  assert.equal((await store.call("terminal_open", { id: host.id })).ok, true);
+  assert.equal(ao.opened.length, 3);
+});
+
+test("closeAll closes every terminal the store opened, best effort, and never throws", async () => {
+  const context = withAo();
+  const { store, ao, behaviour, logs } = context;
+  const host = await pinnedHost(context, keyBlob("close all"));
+  const closeLogs = () => logs.filter((entry) => entry[1] === "ssh.terminals_closed");
+
+  // Nothing open: nothing asked of AO, nothing logged.
+  assert.deepEqual(await store.closeAll("navigation"), { closed: 0, failed: 0 });
+  assert.deepEqual([ao.closed, closeLogs()], [[], []]);
+
+  // The page went away (a reload): its terminal is closed and forgotten, and a new one can open.
+  const opened = await store.call("terminal_open", { id: host.id });
+  assert.equal(opened.ok, true, opened.error);
+  assert.deepEqual(await store.closeAll("navigation"), { closed: 1, failed: 0 });
+  assert.deepEqual(ao.closed, [opened.terminal.handle]);
+  assert.equal((await store.call("terminal_close", { handle: opened.terminal.handle })).code, "not_own", "forgotten");
+  assert.deepEqual(closeLogs(), [["info", "ssh.terminals_closed", { count: 1, failed: 0 }]], "the event and counts only");
+
+  // AO refused the close: still forgotten (no page can reach it), counted as failed, nothing thrown.
+  // One AO no longer has (404) counts as closed. A close that throws at once is caught too.
+  for (const [close, failed] of [
+    [async () => { throw Object.assign(new Error("AO daemon unavailable at C:\\secret"), { status: 502 }); }, 1],
+    [async () => { throw Object.assign(new Error("gone"), { status: 404 }); }, 0],
+    [() => { throw new Error("thrown at once"); }, 1],
+  ]) {
+    behaviour.close = null;
+    const next = await store.call("terminal_open", { id: host.id });
+    assert.equal(next.ok, true, next.error);
+    behaviour.close = close;
+    assert.deepEqual(await store.closeAll("renderer_gone"), { closed: 1 - failed, failed });
+    assert.equal((await store.call("terminal_close", { handle: next.terminal.handle })).code, "not_own");
+  }
+  for (const [level, , fields] of closeLogs()) {
+    assert.ok(["info", "warn"].includes(level));
+    assert.deepEqual(Object.keys(fields).sort(), ["count", "failed"]);
+    assert.equal(JSON.stringify(fields).includes("secret"), false);
+  }
+
+  // An open on its way when the page goes away is closed as it arrives.
+  behaviour.close = null;
+  let release;
+  const going = new Promise((resolve) => { release = resolve; });
+  behaviour.open = async () => { await going; return { handle: "shellterm-ssh-late", generation: "g" }; };
+  const late = store.call("terminal_open", { id: host.id });
+  await new Promise(setImmediate);
+  await store.closeAll("navigation");
+  release();
+  assert.deepEqual([(await late).ok, (await late).code], [false, "page_gone"]);
+  assert.equal(ao.closed.at(-1), "shellterm-ssh-late");
+
+  // dispose() closes too (a backend restart): through this store's own closeTerminal.
+  behaviour.open = null;
+  const kept = await store.call("terminal_open", { id: host.id });
+  assert.equal(kept.ok, true, kept.error);
+  await store.dispose();
+  assert.equal(ao.closed.at(-1), kept.terminal.handle);
+  assert.deepEqual(await store.closeAll("quit"), { closed: 0, failed: 0 }, "nothing left after dispose");
+  // A store without AO's terminal has nothing to close.
+  assert.deepEqual(await makeStore().store.closeAll("quit"), { closed: 0, failed: 0 });
+});
+
+test("a terminal whose host stops being approved, or whose store stops, while it opens is closed again", async () => {
+  const held = () => {
+    let release;
+    let begin;
+    const started = new Promise((resolve) => { begin = resolve; });
+    const going = new Promise((resolve) => { release = resolve; });
+    return { started, release: () => release(), open: (handle) => async () => { begin(); await going; return { handle, generation: "g" }; } };
+  };
+  for (const [name, meanwhile, code] of [
+    ["blocked", async (context, host) => {
+      context.clock.advance(60_000);
+      context.fake.answer(serverShows(keyBlob("another key")));
+      assert.equal((await context.store.fetchKey({ id: host.id })).host.state, "changed");
+    }, "host_changed"],
+    ["removed", async (context, host) => assert.equal((await context.store.remove({ id: host.id })).ok, true), "host_changed"],
+    ["stopped", async (context) => { await context.store.dispose(); }, "restarting"],
+  ]) {
+    const context = withAo();
+    const host = await pinnedHost(context, keyBlob(`held ${name}`));
+    const open = held();
+    context.behaviour.open = open.open(`shellterm-ssh-${name}`);
+    const opening = context.store.call("terminal_open", { id: host.id });
+    await open.started;
+    // The open waits outside the change queue: the person's other changes are not held up by it.
+    await meanwhile(context, host);
+    open.release();
+    const answer = await opening;
+    assert.deepEqual([answer.ok, answer.code], [false, code], name);
+    assert.deepEqual(context.ao.closed, [`shellterm-ssh-${name}`], `${name}: the terminal AO opened is closed again`);
+    assert.equal((await context.store.call("terminal_close", { handle: `shellterm-ssh-${name}` })).code, "not_own", "and not kept");
+  }
 });
 
 test("what leaves the store carries fingerprints, never a key blob", async () => {
@@ -1177,7 +1513,16 @@ test("the host, port and user cannot be changed, and nothing takes an extra argu
   assert.match((await store.update({ id: host.id, production: "yes" })).error, /^Production: /);
   assert.match((await store.update({ id: "nope" })).error, /no longer in the list/);
   assert.match((await store.remove({})).error, /no longer in the list/);
-  assert.match((await store.call("terminal_open", { id: host.id })).error, /no such action/);
+  // The terminal takes a host id or a handle and nothing else: no command, port or option of its own.
+  for (const [operation, args] of [
+    ["terminal_open", { id: host.id, command: "id" }], ["terminal_open", { id: host.id, port: 2222 }], ["terminal_open", { id: host.id, extraArgs: ["-A"] }],
+    ["terminal_open", "example.com"], ["terminal_close", { handle: "shellterm-1", force: true }], ["terminal_close", ["shellterm-1"]],
+  ]) {
+    const answer = await store.call(operation, args);
+    assert.equal(answer.ok, false, `${operation} ${JSON.stringify(args)}`);
+    assert.match(answer.error, /no extra options or arguments/);
+  }
+  assert.match((await store.call("terminal_command", { id: host.id })).error, /no such action/);
   assert.match((await store.call("constructor", {})).error, /no such action/);
   assert.equal(context.fake.probes().length, 1, "a refused call starts nothing");
   assert.deepEqual((await store.list()).hosts, [host]);
@@ -1588,10 +1933,11 @@ test("the app module names its operations, and only list reads", async () => {
   const listed = host.catalog().modules.find((entry) => entry.id === "ssh-connections");
   assert.deepEqual(listed.operations.map((entry) => [entry.name, entry.readOnly]), [
     ["inspect", false], ["list", true], ["add", false], ["update", false], ["remove", false], ["fetch_key", false], ["confirm_key", false],
+    ["terminal_open", false], ["terminal_close", false],
   ]);
   assert.deepEqual(listed.operations.filter((entry) => entry.readOnly).map((entry) => entry.name), ["list"], "list is the only read");
   assert.equal(host.isReadOnly("ssh-connections", "list"), true);
-  for (const operation of [...WRITE_OPERATIONS, "inspect", "terminal_open", "constructor", "toString", "LIST", "list ", ""]) {
+  for (const operation of [...WRITE_OPERATIONS, "inspect", "terminal_command", "constructor", "toString", "LIST", "list ", ""]) {
     assert.equal(host.isReadOnly("ssh-connections", operation), false, operation);
   }
   assert.deepEqual(ssh.OPERATIONS, ["list", ...WRITE_OPERATIONS]);
@@ -1602,8 +1948,11 @@ test("the app module names its operations, and only list reads", async () => {
   assert.deepEqual(service.calls, []);
   await host.call("ssh-connections", "list");
   await host.call({ moduleId: "ssh-connections", operation: "add", arguments: HOST });
-  assert.deepEqual(service.calls, [["list", {}], ["add", HOST]]);
-  await assert.rejects(host.call("ssh-connections", "terminal_open", {}), /does not expose terminal_open/);
+  await host.call("ssh-connections", "terminal_open", { id: "aaaaaaaaaaaa" });
+  await host.call("ssh-connections", "terminal_close", { handle: "shellterm-ssh-1" });
+  assert.deepEqual(service.calls, [["list", {}], ["add", HOST], ["terminal_open", { id: "aaaaaaaaaaaa" }], ["terminal_close", { handle: "shellterm-ssh-1" }]]);
+  // The command line is still no operation of the module.
+  await assert.rejects(host.call("ssh-connections", "terminal_command", {}), /does not expose terminal_command/);
   const unavailable = await createCodingToolsAppsHost().call("ssh-connections", "list");
   assert.equal(unavailable.ok, false);
   assert.match(unavailable.result.error, /SSH hosts are unavailable right now/);
@@ -1682,22 +2031,141 @@ test("main.cjs gives agents no other way in: the control server and the chat too
   // The store is made once per backend start and handed to exactly two readers: the app module's
   // service (the window) and the agent rules, which get the approved list and nothing else.
   const uses = main.split(/\r?\n/).filter((line) => /sshconnections/i.test(line) && !/^\s*\/\//.test(line)).map((line) => line.trim());
+  // The rest of main.cjs only closes its terminals (closeAll: the page went away, AO restarts, the
+  // backend restarts, the app quits).
   assert.deepEqual(uses, [
     "let sshConnectionsService = null;",
+    "\"agent-orchestrator\": async () => { await sshConnectionsService?.closeAll(\"ao_restart\"); await agentOrchestratorUpstream?.stop(); return agentOrchestratorUpstream?.start(); },",
+    "void sshConnectionsService?.closeAll(\"navigation\");",
+    "if (mainWindow === window) void sshConnectionsService?.closeAll(\"renderer_gone\");",
+    "window.webContents.once(\"destroyed\", () => { void sshConnectionsService?.closeAll(\"window_destroyed\"); });",
+    "await step(\"ssh-terminals\", () => sshConnectionsService?.closeAll(\"quit\"), 10_000);",
     "const { createSshConnections } = backendBundles.requireModule(backend, \"ssh-connections.cjs\");",
     "const sshConnections = createSshConnections({",
     "after: sshConnectionsService?.dispose(),",
     "sshConnectionsService = sshConnections;",
     "sshApprovedHosts: () => sshConnections.approvedHosts(),",
     "sshConnections: (operation, args) => sshConnections.call(operation, args),",
+    "await sshConnectionsService?.closeAll(\"backend_restart\");",
   ]);
   const made = main.slice(main.indexOf("const sshConnections = createSshConnections({"), main.indexOf("sshConnectionsService = sshConnections;"));
   assert.match(made, /file: path\.join\(app\.getPath\("userData"\), "integrations", "ssh-hosts\.json"\),/);
   assert.match(made, /knownHostsFile: path\.join\(app\.getPath\("userData"\), "integrations", "ssh-known-hosts"\),/);
   assert.match(made, /probeDir: path\.join\(app\.getPath\("userData"\), "integrations", "ssh-probe"\),/);
+  // The in-app terminal (milestone 2): the store reaches AO through two closures bound to the
+  // upstream made with it, and only its own close sends AO's SSH token. The upstream gets the same
+  // pinned-keys path, made directly (the store is created after it).
+  assert.match(made, /openTerminal: \(fields\) => sshUpstream\.harness\.openSshTerminal\(fields\),/);
+  assert.match(made, /closeTerminal: \(handle\) => sshUpstream\.harness\.closeTerminal\(handle, \{ ssh: true \}\),/);
+  assert.match(main, /const sshUpstream = agentOrchestratorUpstream;\s*const sshConnections = createSshConnections\(\{/);
+  assert.deepEqual([...main.matchAll(/openSshTerminal\(/g)].length, 1, "the store is the only caller of the SSH route");
+  assert.deepEqual([...main.matchAll(/\{ ssh: true \}/g)].length, 1, "and the only close that sends the token");
+  assert.match(main, /case "terminal_close":\s*await agentOrchestratorUpstream\.harness\.closeTerminal\(args\.handle\);/, "the Antigravity CLI page's close goes without it");
+  const upstream = main.slice(main.indexOf("agentOrchestratorUpstream = createAgentOrchestratorUpstream({"), main.indexOf("// Push AO changes to the Mission chat"));
+  assert.match(upstream, /sshKnownHostsFile: path\.join\(app\.getPath\("userData"\), "integrations", "ssh-known-hosts"\),/);
+  assert.ok(main.indexOf("agentOrchestratorUpstream = createAgentOrchestratorUpstream({") < main.indexOf("const sshConnections = createSshConnections({"));
   const chatTools = main.slice(main.indexOf("chatAgentTools = createChatAgentTools({"), main.indexOf("void chatAgentTools.listen()"));
   assert.ok(chatTools.length > 1000);
   assert.doesNotMatch(chatTools, /sshConnections|appsHost|appsMcp/, "the chat agents' tool server is given neither the store nor the apps host");
+});
+
+/** One statement of main.cjs, from `start` to the end of the block it opens (its closing `});` at `indent`). */
+function mainStatement(main, start, indent = "  ") {
+  const from = main.indexOf(start);
+  assert.ok(from > 0, start);
+  const end = main.indexOf(`\n${indent}});`, from);
+  assert.ok(end > from, start);
+  return main.slice(from, end + indent.length + 4);
+}
+
+test("main.cjs closes the SSH page's terminal when its page goes away, and before AO stops", async () => {
+  const main = fs.readFileSync(path.join(electronRoot, "main.cjs"), "utf8");
+  const closes = [];
+  const sshConnectionsService = { closeAll: async (reason) => { closes.push(reason); return { closed: 0, failed: 0 }; } };
+  const handlers = {};
+  const window = { webContents: {
+    on: (name, handler) => { handlers[name] = handler; },
+    once: (name, handler) => { handlers[name] = handler; },
+  } };
+  const surfaces = [];
+  const run = (code, mainWindow = window) => new Function("window", "mainWindow", "sshConnectionsService", "registerHost", "rendererNavigationAllowed", "logger", "recoverRenderer", code)(
+    window, mainWindow, sshConnectionsService, { setSurfaceActive: (active) => surfaces.push(active) },
+    (url) => url.startsWith("app://renderer/"), { warn: () => undefined }, () => undefined);
+
+  // A reload or another page in the main frame closes it; a hash route change is the same document.
+  const navigation = mainStatement(main, "window.webContents.on(\"did-start-navigation\"");
+  run(navigation);
+  for (const [url, inPlace, isMainFrame] of [
+    ["app://renderer/index.html#/ssh-connections", true, true], ["app://renderer/frame.html", false, false], ["https://evil.example/", false, true],
+  ]) {
+    handlers["did-start-navigation"]({}, url, inPlace, isMainFrame);
+    assert.deepEqual(closes, [], `${url} ${inPlace} ${isMainFrame}`);
+  }
+  handlers["did-start-navigation"]({}, "app://renderer/index.html", false, true);
+  assert.deepEqual(closes, ["navigation"]);
+  // Another window's navigation is not the page's.
+  run(navigation, {});
+  handlers["did-start-navigation"]({}, "app://renderer/index.html", false, true);
+  assert.deepEqual(closes, ["navigation"]);
+
+  // The renderer is gone, for any reason (a clean exit included), and the window is destroyed.
+  closes.length = 0;
+  run(mainStatement(main, "window.webContents.on(\"render-process-gone\""));
+  handlers["render-process-gone"]({}, { reason: "clean-exit", exitCode: 0 });
+  handlers["render-process-gone"]({}, { reason: "crashed", exitCode: 1 });
+  const destroyed = main.slice(main.indexOf("window.webContents.once(\"destroyed\""), main.indexOf("\n", main.indexOf("window.webContents.once(\"destroyed\"")));
+  run(destroyed);
+  handlers.destroyed();
+  assert.deepEqual(closes, ["renderer_gone", "renderer_gone", "window_destroyed"]);
+
+  // Quitting (normal, keep-bridge and installer quits share requestQuit): closed while AO still answers.
+  const quit = main.slice(main.indexOf("async function requestQuit("), main.indexOf("exitCommitted = true;", main.indexOf("async function requestQuit(")));
+  const quitClose = quit.indexOf("await step(\"ssh-terminals\", () => sshConnectionsService?.closeAll(\"quit\"), 10_000);");
+  const quitStop = quit.indexOf("await step(\"agent-orchestrator\", () => agentOrchestratorUpstream?.stop(), 20_000);");
+  assert.ok(quitClose > 0 && quitStop > quitClose, "closed before AO stops");
+  assert.equal((quit.match(/agentOrchestratorUpstream\?\.stop\(\)/g) || []).length, 1);
+  assert.doesNotMatch(quit.slice(quit.lastIndexOf("\n", quitClose), quitClose), /if \(|keepBridge/, "on every kind of quit");
+
+  // A backend restart: closed through the old store before the old upstream stops, then the new store
+  // is made (its `after` is the old store's dispose, which closes too).
+  const stopBackend = main.slice(main.indexOf("const stopBackend = async (reason) => {"), main.indexOf("appsHost = null;", main.indexOf("const stopBackend = async (reason) => {")));
+  assert.ok(stopBackend.length > 100);
+  const backendClose = stopBackend.indexOf("await sshConnectionsService?.closeAll(\"backend_restart\");");
+  assert.ok(backendClose > 0 && stopBackend.indexOf("await agentOrchestratorUpstream?.stop()") > backendClose);
+  assert.match(main, /await stopBackend\(reason\);\s*startBackend\(\);/);
+  // Restarting AO alone (the parts menu): closed first too.
+  assert.match(main, /"agent-orchestrator": async \(\) => \{ await sshConnectionsService\?\.closeAll\("ao_restart"\); await agentOrchestratorUpstream\?\.stop\(\);/);
+});
+
+test("each SSH hosts store closes its terminals through the upstream it was made with, also after a backend restart", async () => {
+  const main = fs.readFileSync(path.join(electronRoot, "main.cjs"), "utf8");
+  const block = main.slice(main.indexOf("const sshUpstream = agentOrchestratorUpstream;"), main.indexOf("sshConnectionsService = sshConnections;"));
+  assert.ok(block.includes("createSshConnections({"));
+  const calls = [];
+  const upstream = (name) => ({ harness: {
+    openSshTerminal: async (fields) => { calls.push([name, "open", fields.title]); return { handle: `shellterm-ssh-${name}`, generation: "g" }; },
+    closeTerminal: async (handle, options) => { calls.push([name, "close", handle, options]); },
+  } });
+  // The block as main.cjs runs it in startBackendFrom; afterwards the module's upstream is replaced,
+  // as the next backend start does.
+  const make = new Function("scope", "createSshConnections", "app", "path", "logger",
+    `let agentOrchestratorUpstream = scope.upstream; let sshConnectionsService = scope.previous;\n${block}\nscope.replace = (next) => { agentOrchestratorUpstream = next; };\nreturn sshConnections;`);
+  const scope = { upstream: upstream("first"), previous: null };
+  const options = make(scope, (given) => given, { getPath: () => path.join(scratch, "bound") }, path, null);
+  scope.replace(upstream("second"));
+  await options.openTerminal({ title: "Build server" });
+  await options.closeTerminal("shellterm-ssh-first");
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["first", "open", "Build server"], ["first", "close", "shellterm-ssh-first", { ssh: true }]],
+    "the old store's close reaches the upstream that opened the terminal, never the new one");
+
+  // With the real store: its dispose (the next store's `after`) closes through that same upstream.
+  calls.length = 0;
+  const context = makeStore({ openTerminal: options.openTerminal, closeTerminal: options.closeTerminal });
+  const host = await pinnedHost(context, keyBlob("bound upstream"));
+  const opened = await context.store.call("terminal_open", { id: host.id });
+  assert.equal(opened.ok, true, opened.error);
+  await context.store.dispose();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["first", "open", "Build server"], ["first", "close", "shellterm-ssh-first", { ssh: true }]]);
 });
 
 /**

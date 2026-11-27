@@ -43,12 +43,19 @@ const STOPS = "button:not(:disabled), input:not(:disabled)";
 function fakeModule({ client = CLIENT, hosts = [], shows = { type: "ssh-ed25519", fingerprint: FP_NEW }, refuse = {}, notice = "" } = {}) {
   const list = plain(hosts);
   const ok = (result) => ({ ok: true, moduleId: "ssh-connections", transport: "in-process", result: { ok: true, ...plain(result) } });
-  const fail = (error) => ({ ok: false, moduleId: "ssh-connections", transport: "in-process", result: { ok: false, error } });
+  const fail = (error, code) => ({ ok: false, moduleId: "ssh-connections", transport: "in-process", result: { ok: false, error, ...(code ? { code } : {}) } });
   const find = (id) => list.find((host) => host.id === id);
+  // The terminals it opened (milestone 2): only these close, as in the module.
+  const terminals = new Map();
   return (input) => {
     const args = input.arguments ?? {};
-    if (refuse[input.operation]) return fail(refuse[input.operation]);
+    if (refuse[input.operation]) return typeof refuse[input.operation] === "object" ? fail(refuse[input.operation].error, refuse[input.operation].code) : fail(refuse[input.operation]);
     if (input.operation === "list") return ok({ client, hosts: list, ...(notice ? { notice } : {}) });
+    if (input.operation === "terminal_close") {
+      if (!terminals.has(args.handle)) return fail("This terminal was not opened from the SSH hosts page, so it was not closed here.", "not_own");
+      terminals.delete(args.handle);
+      return ok({});
+    }
     if (input.operation === "add") {
       const host = { id: "f0f0f0f0f0f0", label: args.label, host: args.host, port: args.port, user: args.user, identityFile: args.identityFile ?? null,
         production: args.production === true, state: "draft", key: null, candidate: null, createdAt: "2026-11-26T12:00:00.000Z" };
@@ -75,6 +82,12 @@ function fakeModule({ client = CLIENT, hosts = [], shows = { type: "ssh-ed25519"
       host.key = { type: host.candidate.type, fingerprint: host.candidate.fingerprint, pinnedAt: "2026-11-26T12:06:00.000Z", method: "pasted" in args ? "pasted" : "compared" };
       host.state = "pinned";
       return ok({ host });
+    }
+    if (input.operation === "terminal_open") {
+      if (host.state !== "pinned") return fail("Confirm this host's key before opening a terminal to it.", "not_pinned");
+      const handle = `shellterm-ssh-${terminals.size + 1}`;
+      terminals.set(handle, host.id);
+      return ok({ terminal: { handle, generation: "2026-11-27T10:00:00Z", title: host.label, remote: true, hostId: host.id, production: host.production } });
     }
     throw new Error(`unexpected operation ${input.operation}`);
   };
@@ -166,6 +179,11 @@ function mount({ respond = fakeModule(), active = true, confirmRemove = true } =
     "../api/client": { getCodingToolsClient: () => ({ apps: { call: async (input) => { calls.push(plain(input)); return respond(input); } } }) },
     "../icons": { Icon: () => null },
     "./ssh-connections.css": {},
+    // AO's native terminal view: drawn here as a tag that keeps the props the page gave it.
+    "./AgentOrchestratorOriginalSurface": { AgentOrchestratorOriginalSurface: function AgentOrchestratorOriginalSurface(given) {
+      const { openMissions, ...rest } = given;
+      return { type: "ao-view", props: { ...plain(rest), opensMissions: typeof openMissions, missions: openMissions?.() } };
+    } },
   };
   const { outputText } = ts.transpileModule(source, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
@@ -372,15 +390,17 @@ test("the page shows the ssh client and each host: label, address, state, key, P
   const actions = groups.map((node) => ofType([node], "button").map(labelOf));
   assert.deepEqual(actions, [
     ["Confirm key", "Remove", "Production: Build server"],
-    ["Check key", "Remove", "Production: Database"],
+    ["Open terminal", "Check key", "Remove", "Production: Database"],
     ["Review key change", "Check key", "Remove", "Production: Staging"],
   ]);
   const chips = []; walk(ui.tree(), (node) => { if (String(node.props.className || "").includes("ssh-host-state")) chips.push(node.props.className); });
   assert.deepEqual(chips, ["app-plugin-chip ssh-host-state is-error", "app-plugin-chip ssh-host-state is-ok", "app-plugin-chip ssh-host-state is-blocked"]);
   const switches = ofType(ui.tree(), "button").filter((node) => node.props.role === "switch");
   assert.deepEqual(switches.map((node) => [node.props.className, node.props["aria-checked"]]), [["switch", false], ["switch is-on", true], ["switch", false]]);
-  // The in-app terminal comes later: the page neither offers nor announces it.
-  assert.ok(!ui.buttons().some((label) => /terminal|connect|open/i.test(label)), ui.buttons().join(", "));
+  // The in-app terminal (milestone 2) is offered on the approved host only: never on a host with no
+  // confirmed key or a blocked one, and nothing else on the page connects.
+  assert.deepEqual(ui.buttons().filter((label) => /terminal|connect|open/i.test(label)), ["Open terminal"], ui.buttons().join(", "));
+  assert.equal(ui.button("Open terminal").props.className, "button-primary");
 });
 
 test("an empty list says what approved hosts are for, and a missing ssh client is said plainly", async () => {
@@ -979,9 +999,13 @@ test("nothing on the page behind an open dialog acts, and an open review is neve
 
 test("every operation the page calls is in the contract, and only on the ssh-connections module", () => {
   const operations = [...source.matchAll(/\bcall\("([^"]+)"/g)].map((match) => match[1]);
-  assert.deepEqual([...new Set(operations)].sort(), ["add", "confirm_key", "fetch_key", "list", "remove", "update"]);
+  assert.deepEqual([...new Set(operations)].sort(), ["add", "confirm_key", "fetch_key", "list", "remove", "terminal_close", "terminal_open", "update"]);
   assert.deepEqual([...source.matchAll(/moduleId: "([^"]+)"/g)].map((match) => match[1]), ["ssh-connections"]);
-  assert.match(source, /type SshOperation = "list" \| "add" \| "update" \| "remove" \| "fetch_key" \| "confirm_key";/);
+  assert.match(source, /type SshOperation = "list" \| "add" \| "update" \| "remove" \| "fetch_key" \| "confirm_key" \| "terminal_open" \| "terminal_close";/);
+  // The terminal: a host id to open, the handle it gave to close; nothing else goes with either.
+  assert.match(source, /call\("terminal_open", \{ id: host\.id \}\)/);
+  assert.equal((source.match(/call\("terminal_close", \{ handle \}\)/g) || []).length, 2, "Close terminal, and the page going away with one open");
+  assert.match(source, /useEffect\(\(\) => \(\) => \{\s*const handle = openHandle\.current;\s*if \(handle\) void call\("terminal_close", \{ handle \}\)/);
   // The arguments, as the contract's table names them.
   assert.match(source, /call\("list"\)/);
   assert.match(source, /call\("fetch_key", \{ id: host\.id \}\)/);
@@ -999,7 +1023,7 @@ test("every operation the page calls is in the contract, and only on the ssh-con
   assert.doesNotMatch(source, /\bblob\b/);
 });
 
-test("the source offers no way around the comparison, no terminal, and only the app's own colours", () => {
+test("the source offers no way around the comparison, one terminal in remote mode, and only the app's own colours", () => {
   const around = /always[\s-]+trust|trust[\s-]+always|trust[\s-]+anyway|connect[\s-]+anyway|proceed[\s-]+anyway|continue[\s-]+anyway|don['’]?t[\s-]+ask[\s-]+again|remember[\s-]+this|accept[\s-]+(?:the[\s-]+)?risk|ignore[\s-]+(?:the[\s-]+)?(?:warning|change)/i;
   assert.doesNotMatch(source, around);
   assert.doesNotMatch(styles, around);
@@ -1017,8 +1041,13 @@ test("the source offers no way around the comparison, no terminal, and only the 
   assert.match(source, /if \(event\.key === "Escape"\) \{ event\.preventDefault\(\); event\.stopPropagation\(\); cancel\(\); return; \}/);
   assert.match(source, /document\.addEventListener\("keydown", onKeyDown, true\);/);
   assert.match(source, /for \(const node of beside\) node\.inert = true;/);
-  // The terminal is a later update: no button for it and no note about it.
-  assert.doesNotMatch(source, /coming soon|open terminal|new terminal|terminal_open|>\s*Terminal\s*</i);
+  // The terminal (milestone 2): one button opens it, for an approved host only, and AO shows it in
+  // its remote mode, always. No other terminal, no note about one to come.
+  assert.doesNotMatch(source, /coming soon|new terminal|>\s*Terminal\s*</i);
+  assert.equal((source.match(/"Open terminal"/g) || []).length, 1);
+  assert.match(source, /\{terminalAllowed\(host, hosts \?\? \[\]\)\s*\? <button className="button-primary" disabled=\{working \|\| !client\} onClick=\{\(\) => void openTerminal\(host\)\} ref=\{opener\(`terminal:\$\{host\.id\}`\)\} type="button">/);
+  assert.match(source, /<AgentOrchestratorOriginalSurface hostbar=\{false\} openMissions=\{\(\) => undefined\}\s*terminal=\{\{ handle: terminal\.handle, generation: terminal\.generation, title: terminal\.title, remote: true \}\} \/>/);
+  assert.equal((source.match(/<AgentOrchestratorOriginalSurface/g) || []).length, 1);
   // No colour of its own: tokens only.
   assert.doesNotMatch(styles, /#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(/);
   assert.doesNotMatch(source, /style=\{\{/);
@@ -1041,4 +1070,159 @@ test("SSH hosts is registered wherever a tab is", () => {
   assert.match(sidebarRow.currentLocation, /Connections › Workspace Auth \/ SSH hosts/);
   const line = sidebarRow.items.find((entry) => entry.includes("ssh-connections"));
   assert.ok(line && layoutSurface.includes(`"${line}"`) && layoutSurface.includes(`"${sidebarRow.currentLocation}"`));
+});
+
+// ---------------------------------------------------------------------------------------------
+// The in-app terminal (milestone 2)
+
+test("an approved host opens in the terminal panel, in AO's remote mode, and Close terminal shows the list again", async () => {
+  const ui = await opened({ respond: fakeModule({ hosts: [DRAFT, PINNED, CHANGED] }) });
+  assert.equal(ofType(ui.tree(), "ao-view").length, 0, "no terminal until one is opened");
+  await ui.click("Open terminal");
+  assert.deepEqual(ui.writes(), [{ moduleId: "ssh-connections", operation: "terminal_open", arguments: { id: PINNED.id } }]);
+
+  // The panel takes the list's place: the host's label, its address, the Production tag, and Close.
+  const views = ofType(ui.tree(), "ao-view");
+  assert.equal(views.length, 1);
+  assert.deepEqual(views[0].props, { hostbar: false, terminal: { handle: "shellterm-ssh-1", generation: "2026-11-27T10:00:00Z", title: "Database", remote: true },
+    opensMissions: "function", missions: undefined, children: [] }, "remote mode, always, and no Missions button of its own");
+  const panel = []; walk(ui.tree(), (node) => { if (node.props.role === "group") panel.push(node); });
+  assert.deepEqual(panel.map((node) => node.props["aria-label"]), ["SSH terminal: Database"]);
+  const shown = ui.all();
+  for (const expected of ["Database", "admin@[2001:db8::7]:2222", "Production", "Close terminal"]) assert.ok(shown.includes(expected), expected);
+  assert.deepEqual(ui.buttons(), ["Close terminal"], "one terminal at a time: nothing else can be opened or changed from here");
+  const chips = []; walk(ui.tree(), (node) => { if (String(node.props.className || "").includes("app-plugin-chip")) chips.push([node.props.className, text([node])]); });
+  assert.deepEqual(chips, [["app-plugin-chip ssh-host-state is-error", "Production"]]);
+  for (const gone of ["Build server", "Staging", "Add host", "Check key", "Fingerprint"]) assert.ok(!shown.includes(gone), gone);
+
+  // Close terminal closes it in the module with the handle it gave, then the list is back, with
+  // the focus on the row's Open terminal button (the panel's Close went with the panel).
+  await ui.click("Close terminal");
+  assert.deepEqual(ui.writes().at(-1), { moduleId: "ssh-connections", operation: "terminal_close", arguments: { handle: "shellterm-ssh-1" } });
+  assert.equal(ofType(ui.tree(), "ao-view").length, 0);
+  assert.ok(ui.all().includes("Build server") && ui.all().includes("Add host"));
+  assert.deepEqual(ui.errors, []);
+  assert.equal(ui.focused(), "Open terminal");
+  const focusedRow = []; walk(ui.tree(), (node) => { if (node.props.role === "group" && ofType([node], "button").some((button) => ui.hasFocus(button))) focusedRow.push(node.props["aria-label"]); });
+  assert.deepEqual(focusedRow, ["Database"], "that host's row");
+
+  // A host that is not production has no tag.
+  const plainHost = { ...PINNED, id: "778899aabbcc", label: "Plain", host: "plain.example.com", port: 22, production: false };
+  const other = await opened({ respond: fakeModule({ hosts: [plainHost] }) });
+  await other.click("Open terminal");
+  assert.ok(other.all().includes("deploy") === false && other.all().includes("admin@plain.example.com:22"));
+  assert.ok(!other.all().includes("Production"));
+});
+
+test("Open terminal shows for approved hosts only, waits while busy, and needs the ssh client", async () => {
+  const ui = await opened({ respond: fakeModule({ hosts: [DRAFT, PINNED, CHANGED] }) });
+  assert.deepEqual(ui.buttons().filter((label) => label === "Open terminal").length, 1);
+  const groups = []; walk(ui.tree(), (node) => { if (node.props.role === "group") groups.push(node); });
+  assert.deepEqual(groups.map((node) => ofType([node], "button").some((button) => labelOf(button) === "Open terminal")), [false, true, false]);
+  const missing = await opened({ respond: fakeModule({ client: null, hosts: [PINNED] }) });
+  assert.equal(missing.button("Open terminal").props.disabled, true, "no ssh client, no terminal");
+
+  // While it opens, it and every other action wait; a second click sends nothing more.
+  const module = fakeModule({ hosts: [PINNED] });
+  let finish = () => undefined;
+  const slow = await opened({ respond: (input) => (input.operation === "terminal_open" ? new Promise((resolve) => { finish = () => resolve(module(input)); }) : module(input)) });
+  await slow.click("Open terminal");
+  assert.equal(slow.button("Opening…").props.disabled, true);
+  assert.equal(slow.button("Check key").props.disabled, true);
+  await slow.button("Opening…").props.onClick();
+  assert.equal(slow.writes().length, 1);
+  finish();
+  await slow.settle();
+  assert.ok(slow.button("Close terminal"));
+
+  // From behind an open dialog nothing opens.
+  const behind = await opened({ respond: fakeModule({ hosts: [DRAFT, PINNED] }) });
+  await behind.click("Confirm key");
+  await behind.button("Open terminal").props.onClick();
+  await behind.settle();
+  assert.deepEqual(behind.writes().map((call) => call.operation), ["fetch_key"]);
+  assert.ok(behind.dialog());
+});
+
+test("a refused open says why on the host's row, in the module's words, and shows no terminal", async () => {
+  const words = "OpenSSH was not found on this computer, so the terminal was not opened.";
+  const ui = await opened({ respond: fakeModule({ hosts: [PINNED], refuse: { terminal_open: { error: words, code: "no_client" } } }) });
+  await ui.click("Open terminal");
+  assert.equal(ofType(ui.tree(), "ao-view").length, 0);
+  const notes = []; walk(ui.tree(), (node) => { if (node.props.role === "status" && String(node.props.className).includes("app-plugin-detail")) notes.push([node.props.className, text([node])]); });
+  assert.deepEqual(notes, [["app-plugin-detail is-error", words]]);
+  assert.deepEqual(ui.errors, [], "not also a toast");
+  assert.equal(ui.button("Open terminal").props.disabled, false, "it can be tried again");
+});
+
+test("a close that fails keeps the terminal with the reason; one the module does not know goes back to the list", async () => {
+  const module = fakeModule({ hosts: [PINNED] });
+  let closing = (input) => module(input);
+  const ui = await opened({ respond: (input) => (input.operation === "terminal_close" ? closing(input) : module(input)) });
+  await ui.click("Open terminal");
+  closing = () => ({ ok: false, result: { ok: false, error: "The terminal could not be closed. Try again.", code: "close_failed" } });
+  await ui.click("Close terminal");
+  assert.equal(ofType(ui.tree(), "ao-view").length, 1, "still on screen, to be closed again");
+  const alerts = []; walk(ui.tree(), (node) => { if (node.props.role === "alert") alerts.push(text([node])); });
+  assert.deepEqual(alerts, ["The terminal could not be closed. Try again."]);
+  closing = (input) => module(input);
+  await ui.click("Close terminal");
+  assert.equal(ofType(ui.tree(), "ao-view").length, 0);
+  assert.ok(ui.all().includes("Add host"));
+
+  // The module no longer knows the handle (the app's backend restarted): back to the list, said on the row.
+  await ui.click("Open terminal");
+  closing = () => ({ ok: false, result: { ok: false, error: "This terminal was not opened from the SSH hosts page, so it was not closed here.", code: "not_own" } });
+  await ui.click("Close terminal");
+  assert.equal(ofType(ui.tree(), "ao-view").length, 0);
+  assert.ok(ui.all().includes("This terminal was not opened from the SSH hosts page, so it was not closed here."));
+  assert.ok(ui.button("Open terminal"));
+  assert.equal(ui.focused(), "Open terminal", "the focus goes back to the row here too");
+});
+
+test("a panel that closes while the tab is hidden gives the focus back once the tab is on screen", async () => {
+  const module = fakeModule({ hosts: [DRAFT, PINNED] });
+  let finish = () => undefined;
+  const ui = await opened({ respond: (input) => (input.operation === "terminal_close" ? new Promise((resolve) => { finish = () => resolve(module(input)); }) : module(input)) });
+  await ui.click("Open terminal");
+  await ui.click("Close terminal");
+  // The person switched to another tab before the close came back.
+  ui.show({ active: false });
+  finish();
+  await ui.settle();
+  assert.equal(ofType(ui.tree(), "ao-view").length, 0);
+  assert.equal(ui.focused(), "page", "no focus is moved inside a hidden tab");
+  ui.show({ active: true });
+  await ui.settle();
+  assert.equal(ui.focused(), "Open terminal");
+  // Only once: switching tabs again moves nothing.
+  ui.press(ofType(ui.tree(), "h1")[0]);
+  ui.show({ active: false });
+  ui.show({ active: true });
+  await ui.settle();
+  assert.equal(ui.focused(), "page");
+});
+
+test("the terminal is offered only where the module would open one: approved, with no other key known for the server", () => {
+  const { api } = mount({ active: false });
+  const host = api.hostOf(PINNED);
+  assert.equal(api.terminalAllowed(host, [host]), true);
+  for (const state of ["draft", "changed"]) assert.equal(api.terminalAllowed({ ...host, state }, [{ ...host, state }]), false, state);
+  assert.equal(api.terminalAllowed({ ...host, key: null }, [{ ...host, key: null }]), false, "no confirmed key");
+  // Another entry for the same server and port approved with another key: ssh would accept either.
+  const root = { ...host, id: "665544332211", user: "root", key: { ...host.key, fingerprint: FP_OTHER } };
+  assert.equal(api.terminalAllowed(host, [host, root]), false);
+  assert.equal(api.terminalAllowed(host, [host, { ...root, port: 22 }]), true, "another port is another server");
+  assert.equal(api.terminalAllowed(host, [host, { ...root, key: host.key }]), true, "the same key through another entry");
+  // A key fetched from the server since it was approved that is not this one.
+  const fetchedAfter = { ...root, key: host.key, state: "draft", candidate: { type: "ssh-ed25519", fingerprint: FP_NEW, fetchedAt: "2026-11-22T09:30:00.000Z" } };
+  assert.equal(api.terminalAllowed(host, [host, fetchedAfter]), false);
+  assert.equal(api.terminalAllowed(host, [host, { ...fetchedAfter, candidate: { ...fetchedAfter.candidate, fetchedAt: "2026-11-20T09:30:00.000Z" } }]), true, "one fetched before it was approved");
+  assert.equal(api.terminalAllowed(host, [host, { ...fetchedAfter, candidate: { ...fetchedAfter.candidate, fetchedAt: null } }]), false, "a time not recorded counts as after");
+
+  // The module's answer, read as the page keeps it: always remote; the Production tag if either says so.
+  assert.deepEqual(plain(api.terminalOf({ handle: "shellterm-ssh-1", generation: "g", title: "Database", production: false }, host)),
+    { handle: "shellterm-ssh-1", generation: "g", title: "Database", hostId: host.id, label: "Database", address: "admin@[2001:db8::7]:2222", production: true });
+  assert.equal(api.terminalOf({ handle: "shellterm-ssh-1" }, host).generation, "shellterm-ssh-1");
+  for (const bad of [null, {}, { handle: "bad handle" }, { handle: "" }, { handle: 7 }]) assert.equal(api.terminalOf(bad, host), null, JSON.stringify(bad));
 });

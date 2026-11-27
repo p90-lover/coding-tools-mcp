@@ -60,6 +60,15 @@
 .ssh-key-card code { padding: 0; background: none; color: var(--color-text-primary); }
 .ssh-key-card small { color: var(--color-text-tertiary); font-size: var(--text-xs); line-height: 1.4; }
 
+/* The in-app terminal, in place of the list: the host's name and address as its card shows them,
+   and AO's terminal view filling the rest of the page (as the Antigravity CLI page's does). */
+.ssh-terminal { display: flex; flex-direction: column; height: 100%; min-height: 0; padding: 0 16px 12px; }
+.ssh-terminal-bar { display: flex; flex: none; align-items: center; gap: 12px; min-width: 0; padding: 6px 0 10px; border-bottom: 1px solid var(--color-border-light); }
+.ssh-terminal-bar .button-secondary { flex: none; min-height: 26px; }
+.ssh-terminal > .app-plugin-detail { flex: none; margin: 8px 0 0; }
+.ssh-terminal-view { position: relative; display: flex; flex: 1 1 auto; min-height: 0; margin-top: 10px; }
+.ssh-terminal-view > .ao-original { flex: 1 1 auto; }
+
 @media (max-width: 560px) {
   .ssh-host-head { flex-wrap: wrap; }
   .ssh-key-compare { grid-template-columns: minmax(0, 1fr); }

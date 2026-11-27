@@ -240,7 +240,7 @@ function createHarness(hooks = {}) {
   const sandbox = {
     module: loadedModule,
     require(name) { assert.ok(Object.hasOwn(dependencies, name), `Unexpected dependency: ${name}`); return dependencies[name]; },
-    process: { platform: process.platform, env: { PATH: "fixture", AO_PORT: "1", AO_REMOTE: "inherited-value" } },
+    process: { platform: process.platform, env: { PATH: "fixture", AO_PORT: "1", AO_REMOTE: "inherited-value", ...hooks.processEnv } },
     Buffer, URL, URLSearchParams, AbortSignal, setTimeout, clearTimeout,
     // A test may give the module its own clock (a daemon slow to start, without waiting for real).
     ...(hooks.Date ? { Date: hooks.Date } : {}),
@@ -285,9 +285,10 @@ function createHarness(hooks = {}) {
     provisionResumeWaitsMs: hooks.provisionResumeWaitsMs ?? [0],
     ...(hooks.gatewayKey ? { gatewayKey: hooks.gatewayKey } : {}),
     ...(hooks.extraEnv ? { extraEnv: hooks.extraEnv } : {}),
+    ...(hooks.sshKnownHostsFile !== undefined ? { sshKnownHostsFile: hooks.sshKnownHostsFile } : {}),
     gatewayKeyChecksMs: hooks.gatewayKeyChecksMs ?? [],
   });
-  return { controller, children, gateways, reservations, views, requests, events, warnings, infos, parent, opened, daemonReads, files, probes };
+  return { controller, children, gateways, reservations, views, requests, events, warnings, infos, parent, opened, daemonReads, files, probes, processEnv: sandbox.process.env };
 }
 
 test("chat-host checks go through the probe worker; only an accepted connect is a surviving host", async () => {
@@ -1560,4 +1561,190 @@ test("AO is not restarted when CPA has no key to give, and picks the key up on i
     assert.equal(quiet.keyOf(1), "key-one");
     assert.equal(quiet.launches.length, 0);
   } finally { await quiet.h.controller.stop(); }
+});
+
+// ---------------------------------------------------------------------------------------------
+// The in-app SSH terminal (Connections > SSH hosts, milestone 2). AO's daemon answers any local
+// process with no sign-in, so its SSH route takes a capability token that only this process holds.
+
+const SSH_KNOWN_HOSTS = path.resolve("ao-lifecycle-fixture/user data/integrations/ssh-known-hosts");
+const sshKeysOf = (env) => Object.keys(env).filter((key) => /^ao_ssh_/i.test(key)).sort();
+
+test("with the pinned-keys file AO starts with its SSH settings and a token only this process holds", async () => {
+  // Planted the way an inherited variable or extraEnv would bring them: neither may choose them.
+  const harness = createHarness({
+    sshKnownHostsFile: SSH_KNOWN_HOSTS,
+    processEnv: { ao_ssh_terminal_token: "b".repeat(64), AO_SSH_KNOWN_HOSTS: "C:\\inherited" },
+    extraEnv: async () => ({ AO_SSH_TERMINAL_TOKEN: "a".repeat(64), Ao_Ssh_Known_Hosts: "C:\\planted" }),
+  });
+  const { controller, children, gateways, warnings, infos, processEnv } = harness;
+  try {
+    await controller.start();
+    const env = children[0].options.env;
+    assert.deepEqual(sshKeysOf(env), ["AO_SSH_KNOWN_HOSTS", "AO_SSH_TERMINAL_TOKEN"], "one spelling of each, the upstream's");
+    assert.equal(env.AO_SSH_KNOWN_HOSTS, SSH_KNOWN_HOSTS);
+    const token = env.AO_SSH_TERMINAL_TOKEN;
+    assert.match(token, /^[0-9a-f]{64}$/, "32 random bytes as hex");
+    assert.ok(!["a", "b"].some((letter) => token === letter.repeat(64)), "not a planted one");
+    assert.equal(gateways[0].options.sshTerminalToken, token, "the gateway puts the same one on the page's terminal websocket");
+    // Nowhere else: not this process's environment (the module's or the real one), its logs, its status.
+    assert.equal(Object.values(processEnv).includes(token), false);
+    assert.equal(Object.values(process.env).includes(token), false);
+    assert.equal(JSON.stringify([warnings, infos, controller.snapshot(), gateways[0].options.getStatus()]).includes(token), false);
+
+    // Each daemon start has its own: one an agent of an earlier daemon kept opens nothing now.
+    await controller.stop();
+    await controller.start();
+    const next = children[1].options.env.AO_SSH_TERMINAL_TOKEN;
+    assert.match(next, /^[0-9a-f]{64}$/);
+    assert.notEqual(next, token);
+    assert.equal(gateways[1].options.sshTerminalToken, next);
+  } finally { await controller.stop(); }
+});
+
+test("without the pinned-keys file AO's SSH route stays off and gets neither setting", async () => {
+  for (const sshKnownHostsFile of [undefined, null, "relative\\ssh-known-hosts"]) {
+    const harness = createHarness({
+      sshKnownHostsFile,
+      processEnv: { ao_ssh_terminal_token: "b".repeat(64) },
+      extraEnv: async () => ({ AO_SSH_KNOWN_HOSTS: "C:\\planted", AO_SSH_TERMINAL_TOKEN: "a".repeat(64) }),
+    });
+    const { controller, children, gateways, requests } = harness;
+    try {
+      await controller.start();
+      assert.deepEqual(sshKeysOf(children[0].options.env), [], String(sshKnownHostsFile));
+      assert.equal(gateways[0].options.sshTerminalToken, null);
+      await assert.rejects(controller.harness.openSshTerminal({ host: "build.example.com", port: 22, user: "deploy", title: "Build server" }),
+        (error) => error.code === "SSH_TERMINAL_DISABLED" && /SSH terminals are off/.test(error.message));
+      assert.equal(requests.some((request) => request.url.includes("/shell-terminals")), false, "nothing is asked of AO");
+    } finally { await controller.stop(); }
+  }
+});
+
+test("openSshTerminal sends AO the typed fields and the token; only an SSH close sends the token", async () => {
+  const seen = [];
+  let opened = 0;
+  const harness = createHarness({
+    sshKnownHostsFile: SSH_KNOWN_HOSTS,
+    api: (endpoint, options) => {
+      if (!endpoint.pathname.startsWith("/api/v1/shell-terminals")) return undefined;
+      seen.push({ method: options.method, path: endpoint.pathname, headers: { ...options.headers }, body: options.body === undefined ? undefined : JSON.parse(options.body) });
+      if (options.method === "POST") {
+        opened += 1;
+        return { $status: 201, body: { shellTerminal: { handleId: opened === 4 ? "bad handle" : `shellterm-ssh-${opened}`, createdAt: `2026-11-27T10:00:0${opened}Z`, title: "from AO", workingDir: "C:\\ao\\auth-workspace\\x" } } };
+      }
+      if (endpoint.pathname.endsWith("/shellterm-ssh-3")) return { $status: 404, body: { error: "not_found", code: "SHELL_TERMINAL_NOT_FOUND", message: "No such terminal" } };
+      return {};
+    },
+  });
+  const { controller, children } = harness;
+  try {
+    const first = await controller.harness.openSshTerminal({
+      host: "build.example.com", port: 22, user: "deploy", identityFile: null, title: "Build server", client: { major: 9, minor: 5 }, workspaceId: "ws-1",
+    });
+    const token = children[0].options.env.AO_SSH_TERMINAL_TOKEN;
+    const withToken = { "x-ao-ssh-terminal-token": token, "content-type": "application/json" };
+    assert.deepEqual({ ...first }, { handle: "shellterm-ssh-1", generation: "2026-11-27T10:00:01Z", title: "Build server" }, "no folder or command line comes back");
+    assert.deepEqual(seen[0], { method: "POST", path: "/api/v1/shell-terminals/ssh", headers: withToken,
+      body: { host: "build.example.com", port: 22, user: "deploy", title: "Build server", client: { major: 9, minor: 5 } } });
+    assert.deepEqual(Object.keys(seen[0].body), ["host", "port", "user", "title", "client"], "exactly the route's fields, no workspace");
+
+    // A key file goes as its path; a client version that is not two integers is left out.
+    await controller.harness.openSshTerminal({ host: "2001:db8::7", port: 2222, user: "admin", identityFile: "C:\\keys\\db_ed25519", title: "Database", client: { major: 8, minor: 1 } });
+    assert.deepEqual(seen[1].body, { host: "2001:db8::7", port: 2222, user: "admin", identityFile: "C:\\keys\\db_ed25519", title: "Database", client: { major: 8, minor: 1 } });
+    await controller.harness.openSshTerminal({ host: "build.example.com", port: 22, user: "deploy", title: "Build server", client: { major: "9", minor: 5 } });
+    assert.deepEqual(Object.keys(seen[2].body), ["host", "port", "user", "title"]);
+    // AO's answer is checked like openTerminal's.
+    await assert.rejects(controller.harness.openSshTerminal({ host: "build.example.com", port: 22, user: "deploy", title: "Build server" }), /AO did not open the terminal/);
+    for (const bad of [{ port: "22" }, { host: "" }, { user: undefined }, { title: " " }, { identityFile: "" }]) {
+      await assert.rejects(controller.harness.openSshTerminal({ host: "build.example.com", port: 22, user: "deploy", title: "Build server", ...bad }), /required|must be a path|needs a title/, JSON.stringify(bad));
+    }
+    assert.equal(seen.length, 4, "a malformed call asks AO nothing");
+
+    // The SSH hosts store's close sends the token; it closes only terminals opened here, once.
+    await controller.harness.closeTerminal("shellterm-ssh-1", { ssh: true });
+    assert.deepEqual(seen.at(-1), { method: "DELETE", path: "/api/v1/shell-terminals/shellterm-ssh-1", headers: withToken, body: undefined });
+    await assert.rejects(controller.harness.closeTerminal("shellterm-ssh-1", { ssh: true }), /not opened here/);
+    await assert.rejects(controller.harness.closeTerminal("shellterm-other", { ssh: true }), /not opened here/);
+    assert.equal(seen.length, 5);
+    // Any other caller (the Antigravity CLI page's Close names any handle) goes without it, so AO
+    // answers an SSH terminal there as an unknown one.
+    await controller.harness.closeTerminal("shellterm-ssh-2");
+    assert.deepEqual(seen.at(-1), { method: "DELETE", path: "/api/v1/shell-terminals/shellterm-ssh-2", headers: { "content-type": "application/json" }, body: undefined });
+    await controller.harness.closeTerminal("shellterm-ssh-2", { ssh: true });
+    assert.deepEqual(seen.at(-1).headers, withToken);
+    // One AO no longer has (404) is closed, and forgotten.
+    await controller.harness.closeTerminal("shellterm-ssh-3", { ssh: true });
+    await assert.rejects(controller.harness.closeTerminal("shellterm-ssh-3", { ssh: true }), /not opened here/);
+    // The token went with these requests and no other.
+    assert.equal(seen.filter((request) => JSON.stringify(request).includes(token)).length, 7);
+    assert.equal(harness.requests.filter((request) => JSON.stringify(request.options.headers ?? {}).includes(token)).length, 7);
+    assert.equal(JSON.stringify([harness.warnings, harness.infos]).includes(token), false);
+  } finally { await controller.stop(); }
+});
+
+test("a terminal is shown in AO's remote mode when the page says remote: true, and an SSH handle always is", async () => {
+  const { controller, views } = createHarness({ sshKnownHostsFile: SSH_KNOWN_HOSTS });
+  const query = () => new URLSearchParams(new URL(views[0].url).hash.split("?")[1]);
+  try {
+    await controller.show(firstBounds, false, undefined, { handle: "shellterm-ssh-1", generation: "g1", title: "Build server", remote: true });
+    assert.match(new URL(views[0].url).hash, /^#\/coding-tools-terminal\?/);
+    assert.deepEqual([...query()], [["handle", "shellterm-ssh-1"], ["generation", "g1"], ["title", "Build server"], ["remote", "1"]]);
+    for (const remote of [undefined, false, "1", 1]) {
+      await controller.show(firstBounds, false, undefined, { handle: "shellterm-1", generation: "g2", title: "agy", ...(remote === undefined ? {} : { remote }) });
+      assert.deepEqual([...query()], [["handle", "shellterm-1"], ["generation", "g2"], ["title", "agy"]], String(remote));
+    }
+    // Back to the SSH terminal: remote again.
+    await controller.show(firstBounds, false, undefined, { handle: "shellterm-ssh-1", generation: "g1", title: "Build server", remote: true });
+    assert.equal(query().get("remote"), "1");
+    // An SSH terminal's handle asked for without the flag (upstream_show takes any handle the
+    // window names) is still shown in remote mode.
+    // AO wraps the id on macOS and Linux ("ptyhost-v1:shellterm-ssh-…") and protects it all the same.
+    for (const handle of ["shellterm-ssh-2", "SHELLTERM-SSH-3", "ptyhost-v1:shellterm-ssh-4a5b", "PTYHOST-V1:Shellterm-SSH-6"]) {
+      await controller.show(firstBounds, false, undefined, { handle, generation: "g3", title: "Build server" });
+      assert.equal(query().get("remote"), "1", handle);
+    }
+    for (const handle of ["ptyhost-v1:shellterm-7", "shellterm-sshx", "shellterm-ssh"]) {
+      await controller.show(firstBounds, false, undefined, { handle, generation: "g4", title: "agy" });
+      assert.equal(query().has("remote"), false, handle);
+    }
+  } finally { await controller.stop(); }
+});
+
+test("the SSH token sent is the running daemon's, and an SSH close never starts AO", async () => {
+  const seen = [];
+  const harness = createHarness({
+    sshKnownHostsFile: SSH_KNOWN_HOSTS,
+    api: (endpoint, options) => {
+      if (!endpoint.pathname.startsWith("/api/v1/shell-terminals")) return undefined;
+      seen.push({ method: options.method, port: endpoint.port, token: options.headers?.["x-ao-ssh-terminal-token"] });
+      if (options.method === "POST") return { $status: 201, body: { shellTerminal: { handleId: `shellterm-ssh-${seen.length}`, createdAt: "t" } } };
+      return {};
+    },
+  });
+  const { controller, children } = harness;
+  try {
+    await controller.start();
+    const firstToken = children[0].options.env.AO_SSH_TERMINAL_TOKEN;
+    const opened = await controller.harness.openSshTerminal({ host: "build.example.com", port: 22, user: "deploy", title: "Build server" });
+    assert.deepEqual(seen.at(-1), { method: "POST", port: children[0].options.env.AO_PORT, token: firstToken });
+
+    // AO stopped and the page asks again: the open starts AO, and the header names the new daemon's token.
+    await controller.stop();
+    const again = await controller.harness.openSshTerminal({ host: "build.example.com", port: 22, user: "deploy", title: "Build server" });
+    assert.equal(children.length, 2);
+    const secondToken = children[1].options.env.AO_SSH_TERMINAL_TOKEN;
+    assert.notEqual(secondToken, firstToken);
+    assert.deepEqual(seen.at(-1), { method: "POST", port: children[1].options.env.AO_PORT, token: secondToken });
+
+    // A terminal opened on the first daemon ended with it: closing it asks nothing and starts nothing.
+    const asked = seen.length;
+    await controller.stop();
+    await controller.harness.closeTerminal(opened.handle, { ssh: true });
+    await controller.harness.closeTerminal(again.handle, { ssh: true });
+    assert.equal(children.length, 2, "no daemon was started for a close");
+    assert.equal(controller.snapshot().state, "stopped");
+    assert.equal(seen.length, asked);
+    await assert.rejects(controller.harness.closeTerminal(again.handle, { ssh: true }), /not opened here/, "and they are forgotten");
+  } finally { await controller.stop(); }
 });

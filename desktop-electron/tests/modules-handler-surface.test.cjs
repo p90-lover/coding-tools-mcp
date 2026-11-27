@@ -28,7 +28,7 @@ const LIFECYCLE = Object.freeze([
 const EXPECTED_OPS = Object.freeze({
   "agent-orchestrator": ["inspect", "board", "runs", "update_run"],
   "antigravity-cli": ["inspect", "status", "install", "terminal_open", "terminal_close", "refresh", "sign_in", "sweep", "set_auto"],
-  "ssh-connections": ["inspect", "list", "add", "update", "remove", "fetch_key", "confirm_key"],
+  "ssh-connections": ["inspect", "list", "add", "update", "remove", "fetch_key", "confirm_key", "terminal_open", "terminal_close"],
   cpa: [
     ...LIFECYCLE,
     "health",

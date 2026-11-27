@@ -17,6 +17,9 @@
 // - The store file is the source of truth. The pinned-keys file is written whole from the pinned
 //   records on every change and at start, so a line added to it by hand does not survive.
 // - The key blob never leaves this process: the shape sent to the window carries fingerprints only.
+// - The in-app terminal (terminal_open) opens only to an approved host, after the pinned file is
+//   written again, and AO starts ssh from the host's typed fields; this store closes only the
+//   terminals it opened (milestone 2, 2026-11-27).
 // - Logs carry event names, a host id and counts. Never a host name, a path, a command line or a
 //   fingerprint.
 //
@@ -43,7 +46,11 @@ const VERSION_RETRY_MS = 60_000;
 const STORE_READ_RETRY_DELAYS_MS = Object.freeze([100, 250, 500]);
 const MAX_PROBE_FILE_BYTES = 64 * 1024;
 const MAX_KEY_BLOB_CHARS = 16 * 1024;
-const OPERATIONS = Object.freeze(["list", "add", "update", "remove", "fetch_key", "confirm_key"]);
+const OPERATIONS = Object.freeze(["list", "add", "update", "remove", "fetch_key", "confirm_key", "terminal_open", "terminal_close"]);
+/** An AO terminal handle, as AO's own routes take it. */
+const TERMINAL_HANDLE = /^[\w:.-]{1,200}$/;
+/** The longest terminal title AO's SSH route takes. */
+const TERMINAL_TITLE_CHARS = 80;
 const STATES = Object.freeze(["draft", "pinned", "changed"]);
 const PINNED_FILE_HEADER = "# Coding Tools writes this file from its SSH hosts list. Changes made here are lost.";
 
@@ -542,10 +549,43 @@ function errorCode(error) {
   return typeof error?.code === "string" && /^[A-Z0-9_]{1,32}$/.test(error.code) ? error.code : "unexpected";
 }
 
+/** The terminal's default: none was wired in (the store runs without AO). */
+async function noTerminal() {
+  throw new SshHostsError("The in-app terminal is not available right now. Try again in a moment.", "no_terminal");
+}
+
+/**
+ * Why AO did not open the terminal, said for the person, by AO's error code (its SSH route's codes,
+ * see agent-orchestrator-upstream.cjs openSshTerminal). AO's own message is not shown or logged.
+ */
+function openRefusal(error) {
+  if (error instanceof SshHostsError) return error;
+  switch (typeof error?.code === "string" ? error.code : "") {
+    case "SSH_TERMINAL_DISABLED":
+      return new SshHostsError("Agent Orchestrator has SSH terminals switched off, so the terminal was not opened. Restart the app, then try again.", "terminal_off");
+    case "SSH_TERMINAL_FORBIDDEN":
+    case "SSH_TERMINAL_LOCAL_ONLY":
+      return new SshHostsError("Agent Orchestrator refused to open the terminal. Restart the app, then try again.", "refused");
+    case "SSH_TERMINAL_INVALID":
+      return new SshHostsError("Agent Orchestrator did not accept this host's details, so the terminal was not opened. Remove this host and add it again.", "invalid");
+    case "SSH_TERMINAL_NO_PINNED_KEYS":
+      return new SshHostsError("The pinned keys file was not found, so the terminal was not opened. Try again.", "pinned_missing");
+    case "SSH_TERMINAL_NO_CLIENT":
+      return new SshHostsError("OpenSSH was not found on this computer, so the terminal was not opened.", "no_client");
+    case "SSH_TERMINAL_START_FAILED":
+      return new SshHostsError("OpenSSH could not be started for this host, so the terminal was not opened. Try again, or check the host's details.", "start_failed");
+    default:
+      return new SshHostsError("The terminal could not be opened. Agent Orchestrator may still be starting; try again in a moment.", "open_failed");
+  }
+}
+
 /**
  * The SSH hosts store. `run(executable, argv, { timeoutMs, env, cwd })` resolves { code, stdout,
  * stderr } (and timedOut: true when it ended the program at the limit). `after`, when given, is
  * awaited before the store file is read: the store this one replaces must have finished writing.
+ * `openTerminal({ host, port, user, identityFile, title, client: { major, minor } })` opens the
+ * in-app terminal through AO and resolves { handle, generation, title }; `closeTerminal(handle)`
+ * closes one it opened. Both refuse with code no_terminal unless given.
  */
 function createSshConnections({
   file,
@@ -562,6 +602,8 @@ function createSshConnections({
   // Both files are flushed to disk before they replace the old ones (atomic-file.cjs `durable`):
   // a power cut must not leave the hosts list or the pinned keys torn. Tests turn the flush off.
   durable = true,
+  openTerminal = noTerminal,
+  closeTerminal = noTerminal,
 } = {}) {
   if (!file || !knownHostsFile || !probeDir) throw new Error("The SSH hosts store needs its files");
   let hosts = [];
@@ -575,6 +617,13 @@ function createSshConnections({
   let clientAsked = null;
   let clientFailedAt = null;
   const probes = new Map(); // host id -> the fetch in flight for it
+  // The in-app terminals this store opened (handle -> host id), in memory only. Only these can be
+  // closed through it: a handle the window names is not enough. One at a time (terminal_open);
+  // `opening` holds the place of one on its way.
+  const terminals = new Map();
+  let opening = false;
+  // Counts closeAll calls: a terminal that arrives after one began belongs to a page that is gone.
+  let closeEpoch = 0;
   const timestamp = () => new Date(now()).toISOString();
   const log = (level, event, fields = {}) => { try { logger?.[level]?.(event, fields); } catch { /* a log never fails an action */ } };
   const writeOptions = { durable: durable !== false, protectDirectory: false };
@@ -996,6 +1045,8 @@ function createSshConnections({
     remove,
     fetch_key: fetchKey,
     confirm_key: confirmKey,
+    terminal_open: terminalOpen,
+    terminal_close: terminalClose,
   };
 
   /** The app module's dispatcher (app-handler/ssh-connections). */
@@ -1005,45 +1056,180 @@ function createSshConnections({
   }
 
   /**
-   * The in-app terminal's command for one pinned host: { ok, program, argv, env }, for the main
-   * process to start (milestone 2) with exactly `env` as its environment, nothing of the app's own
+   * The in-app terminal's command for one pinned host: { ok, program, argv, env }, for a caller in
+   * the main process to start with exactly `env` as its environment, nothing of the app's own
    * added: an inherited SSH_ASKPASS with SSH_ASKPASS_REQUIRE=force would make ssh start that program
    * for a prompt, and SSH_SK_PROVIDER names a library it loads (review, 2026-11-27). Not an
    * app-module operation, so the window never receives a command line. The pinned file is written
    * again from the list first: between two changes a line added to it by hand would still be there,
-   * and ssh would accept that key for the host.
+   * and ssh would accept that key for the host. The in-app terminal itself (terminal_open) is
+   * started by AO, which builds this same command line from the typed fields (its snapshot tests
+   * hold the two to each other); it runs the same checks (terminalReady).
    */
   function terminalCommand(args) {
     return answered("terminal_command", () => change(async () => {
       const record = found(argumentsOf(args, ["id"]).id);
-      const info = await clientInfo();
-      if (!info) refuse("OpenSSH was not found on this computer, so the terminal was not opened.", "no_client");
-      const argv = terminalArgv({ ...record, knownHostsFile, client: info, platform });
-      if (disputed(record, hosts)) refuse("This server showed another key. Review it on the SSH hosts page before opening a terminal.", "not_pinned");
-      // A key file that is gone is not skipped by ssh: it warns, drops -i and offers the person's
-      // default keys to the host, IdentitiesOnly or not (review, 2026-11-27, ssh -G on the target machine).
-      if (record.identityFile && !(await fileExists(record.identityFile))) {
-        refuse("Key file: no file was found at that path, so the terminal was not opened. Put the key file back, or remove this host and add it again.", "key_file_missing");
-      }
-      try {
-        await writePinned();
-      } catch (error) {
-        log("error", "ssh.pinned_write_failed", { code: errorCode(error) });
-        refuse("The pinned keys file could not be written, so the terminal was not opened. Try again.", "pinned_write_failed");
-      }
+      const { argv } = await terminalReady(record);
       return { ok: true, program, argv, env: environment() };
     }));
   }
 
   /**
-   * Stops this store: it takes no further change, and a key fetch still running saves nothing.
-   * Resolves once the changes already asked for have landed, so the store that replaces it reads
-   * what they left.
+   * What every terminal to a host waits for, in the change queue: a client, a pinned host whose
+   * server is not known to show another key (terminalArgv also checks its fields again), its key
+   * file still there, and the pinned file written again from the list. Resolves { info, argv }.
+   */
+  async function terminalReady(record) {
+    const info = await clientInfo();
+    if (!info) refuse("OpenSSH was not found on this computer, so the terminal was not opened.", "no_client");
+    const argv = terminalArgv({ ...record, knownHostsFile, client: info, platform });
+    if (disputed(record, hosts)) refuse("This server showed another key. Review it on the SSH hosts page before opening a terminal.", "not_pinned");
+    // A key file that is gone is not skipped by ssh: it warns, drops -i and offers the person's
+    // default keys to the host, IdentitiesOnly or not (review, 2026-11-27, ssh -G on the target machine).
+    if (record.identityFile && !(await fileExists(record.identityFile))) {
+      refuse("Key file: no file was found at that path, so the terminal was not opened. Put the key file back, or remove this host and add it again.", "key_file_missing");
+    }
+    try {
+      await writePinned();
+    } catch (error) {
+      log("error", "ssh.pinned_write_failed", { code: errorCode(error) });
+      refuse("The pinned keys file could not be written, so the terminal was not opened. Try again.", "pinned_write_failed");
+    }
+    return { info, argv };
+  }
+
+  /** Whether the host behind `id` is approved now: listed, pinned, and not disputed. */
+  function stillApproved(id) {
+    const record = hosts.find((entry) => entry.id === id);
+    return Boolean(record && record.state === "pinned" && record.key && !disputed(record, hosts));
+  }
+
+  /**
+   * terminal_open { id }: the in-app terminal to one approved host, run by AO (openTerminal), which
+   * builds ssh's command line itself from these typed fields with the pinned file. The checks and
+   * the pinned file's rewrite run in the change queue, as terminalCommand's do; the open waits
+   * outside it (AO may still be starting), and a terminal whose host stopped being approved
+   * meanwhile, or whose store stopped, is closed again at once. The window gets a handle to show,
+   * never a command line, a path or a key.
+   *
+   * One terminal at a time, as the page shows one: a second open while one is open or on its way
+   * is refused (already_open), so repeated opens cannot pile up sessions nothing on screen reaches.
+   * One whose page went away while it opened (closeAll ran meanwhile) is closed again too.
+   */
+  async function terminalOpen(args) {
+    let hostId = null;
+    let holding = false;
+    try {
+      await ready;
+      if (disposed) throw restarting();
+      if (opening || terminals.size > 0) {
+        throw new SshHostsError("A terminal is already open from this page. Close it first, then open another.", "already_open");
+      }
+      opening = true;
+      holding = true;
+      const epoch = closeEpoch;
+      let fields;
+      await change(async () => {
+        const record = found(argumentsOf(args, ["id"]).id);
+        hostId = record.id;
+        const { info } = await terminalReady(record);
+        fields = {
+          host: record.host, port: record.port, user: record.user, identityFile: record.identityFile,
+          title: [...record.label].slice(0, TERMINAL_TITLE_CHARS).join(""), client: { major: info.major, minor: info.minor },
+        };
+      });
+      let opened;
+      try {
+        opened = await openTerminal(fields);
+      } catch (error) {
+        throw openRefusal(error);
+      }
+      const handle = opened?.handle;
+      if (typeof handle !== "string" || !TERMINAL_HANDLE.test(handle)) throw openRefusal(null);
+      const unwanted = disposed ? restarting()
+        : epoch !== closeEpoch ? new SshHostsError("The page went away while the terminal opened, so the terminal was closed. Open it again.", "page_gone")
+          : stillApproved(hostId) ? null
+            : new SshHostsError("This host changed while its terminal opened, so the terminal was closed. Check the host, then try again.", "host_changed");
+      if (unwanted) {
+        await Promise.resolve().then(() => closeTerminal(handle)).catch(() => log("warn", "ssh.terminal_close_failed", { hostId }));
+        throw unwanted;
+      }
+      terminals.set(handle, hostId);
+      log("info", "ssh.terminal_opened", { hostId });
+      const record = hosts.find((entry) => entry.id === hostId);
+      return {
+        ok: true,
+        terminal: {
+          handle, generation: typeof opened.generation === "string" && opened.generation ? opened.generation.slice(0, 200) : handle,
+          title: fields.title, remote: true, hostId, production: record.production,
+        },
+      };
+    } catch (error) {
+      if (error instanceof SshHostsError) log("warn", "ssh.terminal_refused", { ...(hostId ? { hostId } : {}), code: error.code });
+      throw error;
+    } finally {
+      if (holding) opening = false;
+    }
+  }
+
+  /**
+   * terminal_close { handle }: closes a terminal this store opened, and only such a one. AO also
+   * closes an SSH terminal only for the app's main process (the token); this keeps the window from
+   * naming any other handle through this module.
+   */
+  async function terminalClose(args) {
+    const { handle } = argumentsOf(args, ["handle"]);
+    const hostId = typeof handle === "string" ? terminals.get(handle) : undefined;
+    if (hostId === undefined) {
+      log("warn", "ssh.terminal_refused", { code: "not_own" });
+      refuse("This terminal was not opened from the SSH hosts page, so it was not closed here.", "not_own");
+    }
+    try {
+      await closeTerminal(handle);
+    } catch (error) {
+      // AO no longer has it (it restarted, or reaped it): it is closed.
+      if (error?.status !== 404) {
+        log("warn", "ssh.terminal_refused", { hostId, code: "close_failed" });
+        refuse("The terminal could not be closed. Try again.", "close_failed");
+      }
+    }
+    terminals.delete(handle);
+    log("info", "ssh.terminal_closed", { hostId });
+    return { ok: true };
+  }
+
+  /**
+   * Closes every terminal this store opened, best effort, and forgets them: the page went away (a
+   * reload, a renderer crash), its window closed, the backend restarts or the app quits, and nothing
+   * on screen could reach them again. A terminal on its way is closed as it arrives (terminalOpen).
+   * `reason` says why, for the caller; the log keeps the event name and the counts only. Never throws.
+   */
+  async function closeAll(reason) {
+    void reason;
+    try {
+      closeEpoch += 1;
+      const handles = [...terminals.keys()];
+      terminals.clear();
+      if (!handles.length) return { closed: 0, failed: 0 };
+      const outcomes = await Promise.allSettled(handles.map((handle) => Promise.resolve().then(() => closeTerminal(handle))));
+      // One AO no longer has (404) is closed.
+      const failed = outcomes.filter((outcome) => outcome.status === "rejected" && outcome.reason?.status !== 404).length;
+      log(failed ? "warn" : "info", "ssh.terminals_closed", { count: handles.length, failed });
+      return { closed: handles.length - failed, failed };
+    } catch {
+      return { closed: 0, failed: 0 };
+    }
+  }
+
+  /**
+   * Stops this store: it takes no further change, a key fetch still running saves nothing, and its
+   * terminals are closed (closeAll). Resolves once those are closed and the changes already asked
+   * for have landed, so the store that replaces it reads what they left.
    */
   function dispose() {
     if (!closing) {
       disposed = true;
-      closing = ready.then(() => queue);
+      closing = Promise.all([closeAll("dispose"), ready.then(() => queue)]).then(() => undefined);
     }
     return closing;
   }
@@ -1059,6 +1245,7 @@ function createSshConnections({
     approvedHosts,
     terminalCommand,
     call,
+    closeAll,
     dispose,
   });
 }
