@@ -1,14 +1,15 @@
 "use strict";
 
-// The host interface's first slice (docs/specs/electron-host-seam): the backend reaches Electron's
-// desktop services only through electron/host/electron-host.cjs, and no file starts loading
-// Electron again. Phase 1 of the WebView2 plan; a Tauri host implements the same surface later.
+// The host interface (docs/specs/electron-host-seam, slice 1: desktop services; and
+// electron-host-seam-windows, slice 2: windows): the backend reaches these parts of Electron only
+// through electron/host/electron-host.cjs, and no file starts loading Electron again. Phase 1 of
+// the WebView2 plan; a Tauri host implements the same surface later.
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { HOST_SERVICES, HOST_SPECIAL, createElectronHost } = require("../electron/host/electron-host.cjs");
+const { HOST_SERVICES, HOST_SPECIAL, HOST_CLASSES, createElectronHost } = require("../electron/host/electron-host.cjs");
 
 const ELECTRON_DIR = path.join(__dirname, "..", "electron");
 
@@ -30,6 +31,13 @@ function fakeElectron() {
     powerSaveBlocker: service("powerSaveBlocker", HOST_SERVICES.powerSaveBlocker),
     nativeTheme: { themeSource: "system", shouldUseDarkColors: false },
     Notification: FakeNotification,
+    screen: { ...service("screen", HOST_SERVICES.screen), getMenuBarHeight: record("screen.getMenuBarHeight") },
+    dialog: { ...service("dialog", HOST_SERVICES.dialog), showMessageBoxSync: record("dialog.showMessageBoxSync") },
+    Menu: { ...service("Menu", HOST_SERVICES.Menu), setApplicationMenu: record("Menu.setApplicationMenu") },
+    nativeImage: { ...service("nativeImage", HOST_SERVICES.nativeImage), createEmpty: record("nativeImage.createEmpty") },
+    BrowserWindow: class FakeBrowserWindow { static fromWebContents() { return "window"; } static getAllWindows() { return []; } },
+    BaseWindow: class FakeBaseWindow {},
+    Tray: class FakeTray {},
   };
   return { electron, calls };
 }
@@ -77,11 +85,30 @@ test("the theme and notifications keep Electron's shapes", () => {
 
 test("under plain Node, where require('electron') is a path, every service is null; a stand-in's missing method stays missing", () => {
   const host = createElectronHost("C:\\electron\\electron.exe");
-  for (const name of [...Object.keys(HOST_SERVICES), ...Object.keys(HOST_SPECIAL)]) assert.equal(host[name], null, name);
+  for (const name of [...Object.keys(HOST_SERVICES), ...Object.keys(HOST_SPECIAL), ...Object.keys(HOST_CLASSES)]) assert.equal(host[name], null, name);
   const partial = createElectronHost({ powerSaveBlocker: { start: () => 1 } });
   assert.equal(typeof partial.powerSaveBlocker.start, "function");
   assert.equal(partial.powerSaveBlocker.isStarted, undefined, "callers' `typeof x.isStarted === 'function'` checks keep their meaning");
   assert.equal(createElectronHost({ Notification: { isSupported: () => true } }).Notification, null, "not a class: no notifications");
+});
+
+test("windows: the classes are Electron's own, and screen, dialog, Menu and nativeImage expose only what the backend calls", () => {
+  const { electron, calls } = fakeElectron();
+  const host = createElectronHost(electron);
+  for (const name of Object.keys(HOST_CLASSES)) assert.equal(host[name], electron[name], `${name} passes through, so new, statics and instanceof work`);
+  for (const [name, statics] of Object.entries(HOST_CLASSES)) for (const method of statics) assert.equal(typeof host[name][method], "function", `${name}.${method}`);
+  assert.equal(host.BrowserWindow.fromWebContents({}), "window");
+  assert.equal(host.dialog.showMessageBoxSync, undefined, "the blocking variant is not offered: nothing in the backend uses it");
+  assert.equal(host.Menu.setApplicationMenu, undefined);
+  assert.equal(host.nativeImage.createEmpty, undefined);
+  assert.equal(host.screen.getMenuBarHeight, undefined);
+  const window = { id: 7 };
+  host.dialog.showMessageBox(window, { message: "Replace the current goal?" });
+  host.screen.getCursorScreenPoint();
+  assert.deepEqual(calls.map(({ name, args }) => [name, args]), [
+    ["dialog.showMessageBox", [window, { message: "Replace the current goal?" }]],
+    ["screen.getCursorScreenPoint", []],
+  ], "calls go through unchanged, the window argument included");
 });
 
 test("building the host reads no service method; each is looked up when the backend uses it", () => {
@@ -100,14 +127,16 @@ test("building the host reads no service method; each is looked up when the back
 // The ratchet. Files that may still load Electron, and the names each may still import from it; each
 // slice of the seam removes entries, never adds them. Slice 1 moved the desktop services.
 const MAY_LOAD_ELECTRON = new Map([
-  ["main.cjs", ["app", "BrowserWindow", "BaseWindow", "WebContentsView", "dialog", "ipcMain", "Menu", "net", "nativeImage", "screen", "session", "Tray", "webFrameMain", "webContents"]],
+  // Slice 2 moved BrowserWindow, BaseWindow, Tray, screen, dialog, Menu and nativeImage.
+  ["main.cjs", ["app", "WebContentsView", "ipcMain", "net", "session", "webFrameMain", "webContents"]],
   ["browser-host.cjs", ["WebContentsView"]],
   ["main-with-provider.cjs", null],
   // The Electron implementation of the host interface: the one place Electron belongs.
   ["host/electron-host.cjs", null],
   ["preload.cjs", ["contextBridge", "ipcRenderer", "webUtils"]],
 ]);
-const MOVED_BEHIND_HOST = ["clipboard", "nativeTheme", "Notification", "safeStorage", "shell", "powerMonitor", "powerSaveBlocker"];
+const MOVED_BEHIND_HOST = ["clipboard", "nativeTheme", "Notification", "safeStorage", "shell", "powerMonitor", "powerSaveBlocker",
+  "BrowserWindow", "BaseWindow", "Tray", "screen", "dialog", "Menu", "nativeImage"];
 
 function backendFiles(dir, base = dir) {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {

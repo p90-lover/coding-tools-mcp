@@ -1,7 +1,8 @@
 "use strict";
 
-// The backend's one door to Electron's desktop services (docs/specs/electron-host-seam, slice 1 of
-// the WebView2 plan's phase 1). It hands out the methods the backend actually calls, under
+// The backend's one door to Electron's desktop services and windows (docs/specs/electron-host-seam
+// and electron-host-seam-windows: slices 1 and 2 of the WebView2 plan's phase 1). It hands out the
+// methods the backend actually calls, under
 // Electron's own names, and nothing else: call sites keep working unchanged, a new use of another
 // Electron method fails in tests instead of tying the backend to Electron again, and the coming
 // Tauri / WebView2 host implements this same small surface.
@@ -17,6 +18,22 @@ const HOST_SERVICES = Object.freeze({
   shell: Object.freeze(["openExternal", "openPath", "showItemInFolder"]),
   powerMonitor: Object.freeze(["on", "removeListener", "getSystemIdleTime"]),
   powerSaveBlocker: Object.freeze(["start", "stop", "isStarted"]),
+  // Slice 2 (docs/specs/electron-host-seam-windows): the modules around windows.
+  screen: Object.freeze(["getPrimaryDisplay", "getDisplayNearestPoint", "getCursorScreenPoint", "getAllDisplays", "dipToScreenRect"]),
+  dialog: Object.freeze(["showMessageBox", "showOpenDialog", "showSaveDialog", "showErrorBox"]),
+  Menu: Object.freeze(["buildFromTemplate"]),
+  nativeImage: Object.freeze(["createFromPath", "createFromDataURL"]),
+});
+/**
+ * The window classes pass through as Electron's own (slice 2): their instances must stay real
+ * Electron windows until the WebView2 host exists, and Electron hands them back in events. Listed
+ * here with the statics the backend calls; design.md records the methods called on their
+ * instances, the contract the WebView2 host meets.
+ */
+const HOST_CLASSES = Object.freeze({
+  BrowserWindow: Object.freeze(["fromWebContents", "getAllWindows"]),
+  BaseWindow: Object.freeze([]),
+  Tray: Object.freeze([]),
 });
 /** The other two, which are not plain method sets: a settable property and a class. */
 const HOST_SPECIAL = Object.freeze({
@@ -83,10 +100,22 @@ function createElectronHost(electron) {
     powerSaveBlocker: pick(api.powerSaveBlocker, HOST_SERVICES.powerSaveBlocker),
     nativeTheme: themeOf(api.nativeTheme),
     Notification: notificationOf(api.Notification),
+    screen: pick(api.screen, HOST_SERVICES.screen),
+    dialog: pick(api.dialog, HOST_SERVICES.dialog),
+    Menu: pick(api.Menu, HOST_SERVICES.Menu),
+    nativeImage: pick(api.nativeImage, HOST_SERVICES.nativeImage),
+    BrowserWindow: classOf(api.BrowserWindow),
+    BaseWindow: classOf(api.BaseWindow),
+    Tray: classOf(api.Tray),
   });
+}
+
+/** Electron's own class, or null under plain Node. */
+function classOf(Native) {
+  return typeof Native === "function" ? Native : null;
 }
 
 // No shared instance: each caller builds its host from the require("electron") it loaded, as it
 // destructured Electron before. A test that reloads a module with another Electron stand-in then
 // gets that stand-in's services, not a previous one's.
-module.exports = { HOST_SERVICES, HOST_SPECIAL, createElectronHost };
+module.exports = { HOST_SERVICES, HOST_SPECIAL, HOST_CLASSES, createElectronHost };
