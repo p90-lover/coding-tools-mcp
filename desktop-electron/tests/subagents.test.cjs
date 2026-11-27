@@ -87,6 +87,37 @@ test("a retained child already removed from AO does not prevent parent shutdown"
   } finally { w.cleanup(); }
 });
 
+test("stopping a subagent still starting releases it when the interrupt already ended its session", async () => {
+  const w = world({ settings: { maxPerChat: 1, maxConcurrent: 1 } });
+  try {
+    const { subagent_id: id } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read one" }));
+    assert.equal(w.service.runs()[0].state, "starting");
+    // AO kills a session interrupted while it is still being provisioned; exit then finds it gone.
+    w.harness.interrupt = async (sid) => { w.interrupted.push(sid); w.sessions.set(sid, { exited: true, turnState: "interrupted", status: "terminated", approvals: [] }); };
+    w.harness.exitAgent = async () => { throw new Error("session ended (SESSION_TERMINATED)"); };
+    const stopped = await w.service.call("chat-1", "ws-1", "subagent_stop", { subagent_id: id });
+    assert.equal(stopped.isError, false, stopped.content?.[0]?.text);
+    assert.equal(w.service.runs()[0].state, "stopped");
+    // Its slots are free again: a new subagent starts in the same chat.
+    w.harness.exitAgent = async (sid) => { w.released.push(sid); return { ok: true }; };
+    assert.equal((await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read two" })).isError, false);
+  } finally { w.cleanup(); }
+});
+
+test("a stop that lands after the subagent's turn finished keeps its report, as completed", async () => {
+  const w = world();
+  try {
+    const { subagent_id: id } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read one" }));
+    // The turn finished since the last poll (or just inside the time limit); an interrupt does not undo it.
+    w.sessions.set(id, { turnState: "completed", status: "ready", answer: "Found it in src/a.ts", approvals: [] });
+    w.harness.interrupt = async (sid) => { w.interrupted.push(sid); };
+    assert.equal((await w.service.call("chat-1", "ws-1", "subagent_stop", { subagent_id: id })).isError, false);
+    const [run] = w.service.runs();
+    assert.equal(run.state, "completed");
+    assert.equal(run.report, "Found it in src/a.ts");
+  } finally { w.cleanup(); }
+});
+
 test("a parent stop waits for its pending launch and ends the returned child", async () => {
   const w = world({ settings: { releaseWhenDone: false } });
   let finishLaunch, spawnCalled;
@@ -253,6 +284,22 @@ test("requests a subagent raises are answered for it, except what the safety rul
     assert.deepEqual(w.inputs, [[id, "a3", "accept", { pick: "b" }]]);
     parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
     assert.equal(w.resolved.length, 3, "each request is answered once");
+  } finally { w.cleanup(); }
+});
+
+test("a subagent request AO marks for a human, or beyond what the guard reads, is denied", async () => {
+  const w = world();
+  try {
+    const { subagent_id: id } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "implementer", task: "x" }));
+    const decisions = [{ id: "allow", kind: "allow_once" }, { id: "deny", kind: "reject_once" }];
+    w.sessions.set(id, { turnState: "running", approvals: [
+      { approval_id: "human", kind: "command", tool: "Bash", command: "npm test", guardianRequiresHuman: true, decisions },
+      { approval_id: "shell", kind: "command", tool: "Bash", command: "npm run dev", guardianUnsupported: true, decisions },
+      { approval_id: "cut", kind: "permission", tool: "Write", path: "src/a.ts", reviewTruncated: true, decisions },
+      { approval_id: "plain", kind: "command", tool: "Bash", command: "npm test", decisions },
+    ] });
+    parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
+    assert.deepEqual(w.resolved, [[id, "human", "deny"], [id, "shell", "deny"], [id, "cut", "deny"], [id, "plain", "allow"]]);
   } finally { w.cleanup(); }
 });
 
@@ -512,16 +559,41 @@ test("a subagent with no model, a disabled one, or subagents turned off cannot s
   } finally { w.cleanup(); }
 });
 
-test("Full access starts subagents with permissions bypassed; opencode keeps its own mode", async () => {
+test("Full access starts subagents with permissions bypassed, only from a chat that bypasses them itself", async () => {
   const w = world({ settings: { permission: "full" }, agents: [{ name: "Fast" }, { name: "Open", route: { harness_id: "ao:opencode", model: "cpa/test-model" } }] });
   try {
-    await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "fast", task: "x" });
+    await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "fast", task: "x" }, { parentBypass: true });
     assert.equal(w.spawned[0].approvalMode, "bypass-permissions");
     assert.equal(w.spawned[0].autoReview, undefined);
-    await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "open", task: "y" });
+    await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "open", task: "y" }, { parentBypass: true });
     assert.equal(w.spawned[1].agent, "opencode");
-    assert.equal(w.spawned[1].approvalMode, undefined);
+    assert.equal(w.spawned[1].approvalMode, "bypass-permissions", "opencode gets the page's mode too");
     assert.equal(w.spawned[1].model, "openai/test-model", "opencode names a CPA model through its OpenAI provider");
+    // A chat that asks or is on "Approve for me" cannot reach Full access through a subagent.
+    await w.service.call("chat-3", "ws-1", "subagent_start", { agent: "fast", task: "z" });
+    assert.equal(w.spawned[2].approvalMode, "accept-edits");
+    assert.equal(w.spawned[2].autoReview, true);
+  } finally { w.cleanup(); }
+});
+
+test("Approve for me gives every agent that can ask its mode, and refuses one that runs only in Full access", async () => {
+  const w = world({ settings: { permission: "auto" }, agents: [
+    { name: "Open", route: { harness_id: "ao:opencode", model: "cpa/test-model" } },
+    { name: "Pi", route: { harness_id: "ao:pi", model: "cpa/test-model" } },
+    { name: "Cline", route: { harness_id: "ao:cline", model: "cpa/test-model" } },
+  ] });
+  try {
+    await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "open", task: "x" });
+    assert.equal(w.spawned[0].agent, "opencode");
+    assert.equal(w.spawned[0].approvalMode, "accept-edits", "opencode no longer starts in its own allow-everything default");
+    assert.equal(w.spawned[0].autoReview, true);
+    await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "pi", task: "y" });
+    assert.equal(w.spawned[1].agent, "pi");
+    assert.equal(w.spawned[1].approvalMode, "accept-edits");
+    const refused = await w.service.call("chat-3", "ws-1", "subagent_start", { agent: "cline", task: "z" });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /Full access/);
+    assert.equal(w.spawned.length, 2, "nothing was started for the agent that cannot ask");
   } finally { w.cleanup(); }
 });
 
@@ -547,7 +619,8 @@ test("chat agents get the subagent tools when subagents are on; a subagent's own
     const list = await post(url, headers.Authorization, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
     assert.deepEqual(list.result.tools.map((tool) => tool.name).filter((name) => SUBAGENT_TOOLS.has(name)).sort(), [...SUBAGENT_TOOLS].sort());
     await post(url, headers.Authorization, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "subagent_start", arguments: { agent: "reviewer", task: "t", confirm: true } } });
-    assert.deepEqual(calls, [["chat-1", "ws1", "subagent_start", { agent: "reviewer", task: "t" }]], "routed with the chat's own session; consent arguments stripped");
+    assert.deepEqual(calls, [["chat-1", "ws1", "subagent_start", { agent: "reviewer", task: "t" }, { parentBypass: false }]],
+      "routed with the chat's own session and mode; consent arguments stripped");
 
     const sub = await tools.lease({ agent: "claude-code", workspaceId: "ws1", subagent: true });
     sub.bind("sub-1");

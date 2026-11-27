@@ -42,6 +42,20 @@ test("writes inside the workspace folder pass the native reviewer, with no model
   assert.equal(readOnlyInspection("Get-Content x > y", FOLDER), null);
 });
 
+test("a command that writes and runs a script, or runs one by bare name, is left to the quota reviewers", async () => {
+  // The script is read before the command runs; the command's own write could replace it first.
+  const files = scripts({ "x.ps1": "Write-Output ok\n", "npx.ps1": "Write-Output ok\n" });
+  for (const command of [
+    "Set-Content x.ps1 'shutdown /s /t 0'; & .\\x.ps1",
+    "Copy-Item payload.txt x.ps1; powershell -NoProfile -File x.ps1",
+    "Get-Content payload.txt > x.ps1; & .\\x.ps1",
+    // PowerShell runs a bare name from PATH, never the folder's file read here.
+    "& 'npx.ps1' -y somepkg",
+  ]) assert.equal(await review(command, files), null, command);
+  // Reading and then running a checked script still passes.
+  assert.ok(await review("Get-ChildItem; & .\\x.ps1", files));
+});
+
 test("the native reviewer reads the scripts a command runs, recursively, and judges their steps", async () => {
   const files = scripts({
     "scripts\\build.ps1": "# build the docs\n$ErrorActionPreference = 'Stop'\nnpm run build\n& '.\\scripts\\copy.ps1'\nGet-ChildItem dist | Select-Object Name\n",
@@ -55,8 +69,9 @@ test("the native reviewer reads the scripts a command runs, recursively, and jud
   assert.ok(await review(".\\scripts\\build.ps1", files));
   assert.ok(await review("powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\build.ps1", files));
   assert.ok(await review("pwsh -File 'scripts\\copy.ps1' -Verbose", files));
-  // A script that runs itself again is read once.
-  const loop = scripts({ "a.ps1": "Get-ChildItem\n& '.\\b.ps1'\n", "b.ps1": "& '.\\a.ps1'\nSet-Content out.txt 'x'\n" });
+  // A script that runs itself again is read once. (A script that runs one and also writes is left
+  // to the quota reviewers: the write could replace what was read.)
+  const loop = scripts({ "a.ps1": "Get-ChildItem\n& '.\\b.ps1'\n", "b.ps1": "& '.\\a.ps1'\nGet-ChildItem out\n" });
   assert.ok(await review("& .\\a.ps1", loop));
   assert.deepEqual(loop.reads, ["a.ps1", "b.ps1"]);
 });

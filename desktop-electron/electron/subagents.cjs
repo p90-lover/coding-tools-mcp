@@ -13,9 +13,14 @@
 // - One level: a subagent's own session gets no subagent tools (chat-agent-tools.cjs).
 // - A chat agent sees only the subagents it started.
 
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { gitPushRequest } = require("./git-remote.cjs");
+// AO drops a message whose client id it has seen in that conversation (202, no turn). A run's
+// counters start again after an app restart and recoveries restart with each turn, so every id
+// carries this process's own nonce: a follow-up after a restart is never taken for an old one.
+const MESSAGE_NONCE = crypto.randomBytes(4).toString("hex");
 
 const EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 const PERMISSIONS = new Set(["auto", "full"]);
@@ -276,8 +281,11 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     runsQueued = true;
     runsSaving = runsSaving.catch(() => {}).then(async () => {
       runsQueued = false;
+      // Every active run is kept, whatever its age: one left out would be forgotten after a
+      // restart while its AO session runs on, unsupervised. Recent ended runs fill the rest.
       const kept = [...runs.values()].filter((run) => ACTIVE.has(run.state) || now() - (run.endedAt ?? run.startedAt) < KEEP_ENDED_MS)
-        .sort((a, b) => b.startedAt - a.startedAt).slice(0, MAX_SAVED_RUNS)
+        .sort((a, b) => Number(ACTIVE.has(b.state)) - Number(ACTIVE.has(a.state)) || b.startedAt - a.startedAt)
+        .slice(0, Math.max(MAX_SAVED_RUNS, [...runs.values()].filter((run) => ACTIVE.has(run.state)).length))
         .map((run) => Object.fromEntries(SAVED_FIELDS.filter((key) => run[key] !== undefined).map((key) => [key, run[key]])));
       await writeWhole(runsPath, { version: 1, runs: kept });
     }).catch((error) => logger?.warn?.("subagents.runs_save_failed", { message: String(error?.message ?? error).slice(0, 200) }));
@@ -379,10 +387,13 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     if (run.kind === "team") run.released = true;
     if (run.released === true) return Promise.resolve({ ok: true });
     if (!run.releasePromise) {
-      const retained = !ACTIVE.has(run.state);
+      // A session already gone counts as released when that was the point: a retained report can
+      // outlive a session the user removed, and a stop's acknowledged interrupt can end a session
+      // still starting (AO then answers exit with SESSION_TERMINATED or SESSION_NOT_FOUND). Without
+      // the second case such a run stayed "starting" with its slots held until the app restarted.
+      const goneIsReleased = !ACTIVE.has(run.state) || (run.stopping === true && run.stopAcknowledged === true);
       run.releasePromise = Promise.resolve().then(() => harness()?.exitAgent?.(run.id)).catch(error => {
-        // A retained report can outlive a session the user already removed.
-        if (!retained || !/\b(?:SESSION_NOT_FOUND|SESSION_TERMINATED)\b/.test(String(error?.message))) throw error;
+        if (!goneIsReleased || !/\b(?:SESSION_NOT_FOUND|SESSION_TERMINATED)\b/.test(String(error?.message))) throw error;
         return { ok: true };
       }).then(outcome => {
         if (outcome?.ok !== true) throw new Error(`Subagent ${run.id} shutdown is unconfirmed`);
@@ -430,7 +441,11 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
         if (approval.kind === "plan") {
           decision = decisions.find((item) => /acceptEdits/i.test(item.id)) ?? decisions.find((item) => item.kind === "allow_once");
         } else if (Buffer.byteLength(request, "utf8") >= MAX_CHECKED_REQUEST || blockedRequest(approval)
-          || gitPushRequest(approval.command) || gitPushRequest(approval.toolInput)) {
+          || gitPushRequest(approval.command) || gitPushRequest(approval.toolInput)
+          // What AO marks as needing a human, or as beyond what the guard can read (a shell call
+          // that disables the sandbox, runs in the background, or names another directory; a
+          // request cut for length), has nobody to ask here: denied, never allowed unread.
+          || approval.guardianRequiresHuman === true || approval.guardianUnsupported === true || approval.reviewTruncated === true) {
           // Too long to be sure of (AO's upstream cuts a tool's input at 1500 bytes and a command
           // at 4000, so the blocked part may sit past the cut): denied, as "Approve for me" does.
           // This guard-only path has no repository/model verdict. Publication goes through the
@@ -523,7 +538,9 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     if (!continuable || run.stopping || !ACTIVE.has(run.state)) return false;
     run.recoveries = tries + 1;
     try {
-      const sent = await service.send(run.id, RECOVER_NOTE, `subagent:${run.id}:recover:${run.recoveries}`);
+      // recoveries restart with each turn; the send count never does (and the nonce covers restarts).
+      run.recoverSends = (run.recoverSends ?? 0) + 1;
+      const sent = await service.send(run.id, RECOVER_NOTE, `subagent:${run.id}:recover:${MESSAGE_NONCE}:${run.recoverSends}`);
       // A resumed turn gets the whole time limit again, as a follow-up does (check).
       Object.assign(run, { turnId: sent?.turnId ?? run.turnId, state: "starting", released: false, misses: 0, recovering: null,
         turns: (run.turns ?? 1) + 1, turnStartedAt: now() });
@@ -716,10 +733,13 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   }
 
   /** Starts a subagent for the chat session `parent` (an AO session id) in `workspaceId`. */
-  async function start(parent, workspaceId, { agent: wanted, team: wantedTeam, task, ...picks } = {}) {
+  async function start(parent, workspaceId, { agent: wanted, team: wantedTeam, task, ...picks } = {}, { parentBypass = false } = {}) {
     const generation = stopGenerations.get(parent) ?? 0;
-    const { settings } = read();
-    if (!settings.enabled) throw new Error("Subagents are turned off on the Subagents page");
+    const saved = read().settings;
+    if (!saved.enabled) throw new Error("Subagents are turned off on the Subagents page");
+    // A subagent never runs with more than its chat: only a chat that itself bypasses permissions
+    // may start one in "Full access"; any other chat's subagent runs on "Approve for me" rules.
+    const settings = saved.permission === "full" && parentBypass !== true ? { ...saved, permission: "auto" } : saved;
     const brief = text(task, MAX_TASK);
     if (!brief) throw new Error("Give the subagent a task");
     if (wantedTeam !== undefined && wantedTeam !== null) {
@@ -783,9 +803,11 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     const permissions = settings.permission === "full"
       ? { permission_profile: ":danger-full-access", approval_policy: "never", approvals_reviewer: "user" }
       : { permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
-    // AO honours an explicit permission mode only on Claude Code and Codex; opencode keeps its own.
-    const explicit = ["ao:claude-code", "ao:codex"].includes(route.harness_id);
-    const args = launchArgs(workspaceId, { ...route, ...(explicit ? permissions : {}) }, `Subagent · ${agent.name}`);
+    // Every subagent gets the page's mode. Claude Code, Codex, opencode, Pi and Antigravity honour
+    // it (the workflow's PERMISSION_AGENTS); for an agent that runs only in Full access, launchArgs
+    // refuses "Approve for me" with its reason instead of starting it in that agent's own default,
+    // which for opencode allowed every tool unasked.
+    const args = launchArgs(workspaceId, { ...route, ...permissions }, `Subagent · ${agent.name}`);
     const prompt = [agent.instructions, SUBAGENT_NOTE, REPORT_NOTE, `Task:\n${brief}`].filter(Boolean).join("\n\n");
     const service = harness();
     if (!service) throw new Error("Agent Orchestrator is not running");
@@ -857,6 +879,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     run.stopping = true;
     run.stopPromise = Promise.resolve().then(async () => {
       const service = harness();
+      let finishedReport = null;
       if (active && run.kind === "team") {
         // The workflow's mission Stop: no more work starts and its owned agents are interrupted.
         const owner = teams();
@@ -876,9 +899,15 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
         }
         const observed = await service.observe(run.id);
         if (!settled(observed)) throw new Error("Stop requested; the subagent is still working or its settlement is unconfirmed");
+        // A turn that finished before the stop took hold (just inside the time limit, or since the
+        // last poll) keeps its report: it is completed, not stopped or timed out.
+        if (observed?.turnState === "completed" && (!run.turnId || !observed.turnId || observed.turnId === run.turnId)) {
+          finishedReport = String(observed.answer || "").slice(0, MAX_REPORT) || "(The subagent finished without a written report.)";
+        }
       }
       await release(run);
-      if (ACTIVE.has(run.state)) finish(run, run.stopState ?? "stopped", { ...(run.stopState ? {} : { error: "" }), released: true });
+      if (ACTIVE.has(run.state) && finishedReport !== null) finish(run, "completed", { report: finishedReport, error: "", released: true });
+      else if (ACTIVE.has(run.state)) finish(run, run.stopState ?? "stopped", { ...(run.stopState ? {} : { error: "" }), released: true });
       else run.stopping = false;
       return run;
     }).catch(error => {
@@ -917,7 +946,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     if (!body) throw new Error("Write the message for the subagent");
     if (run.stopping) throw new Error("This subagent is stopping; message it once subagent_result shows it stopped");
     if (run.resuming) throw new Error("This subagent is already taking a message; wait for it");
-    const messageId = () => `subagent:${run.id}:${(run.messages = (run.messages ?? 0) + 1)}`;
+    const messageId = () => `subagent:${run.id}:${MESSAGE_NONCE}:${(run.messages = (run.messages ?? 0) + 1)}`;
     // Read first: one that finished since the last poll takes a new turn, not a steer.
     if (ACTIVE.has(run.state)) await check(run).catch(() => undefined);
     if (run.stopping) throw new Error("This subagent is stopping; message it once subagent_result shows it stopped");
@@ -1032,7 +1061,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   }
 
   /** One subagent tool call from the chat session `parent` (an AO session id) in `workspaceId`. */
-  async function call(parent, workspaceId, name, args = {}) {
+  async function call(parent, workspaceId, name, args = {}, { parentBypass = false } = {}) {
     if (!parent) return failure("This chat's session is not ready yet; try again in a moment.");
     try {
       switch (name) {
@@ -1050,7 +1079,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
         case "subagent_models": return textResult(await modelList(workspaceId));
         case "subagent_start": {
           const run = await start(parent, workspaceId, { agent: args.agent, team: args.team, task: args.task,
-            model: args.model, effort: args.effort, context_window: args.context_window });
+            model: args.model, effort: args.effort, context_window: args.context_window }, { parentBypass });
           if (Number.isSafeInteger(args.wait_seconds) && args.wait_seconds > 0) await waitFor(run, args.wait_seconds);
           return textResult(view(run));
         }

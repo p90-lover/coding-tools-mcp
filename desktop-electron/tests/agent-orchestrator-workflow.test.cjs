@@ -11806,9 +11806,11 @@ test("Approve for me: a computer use step in an app the chat may use needs no re
 
 test("Approve for me: the chat's preview tools and routine commands through the app's terminal pass; anything else asks", () => {
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }), findCodexExecutable: () => "C:/codex.exe" });
-  for (const tool of ["preview_open", "preview_read", "preview_screenshot", "preview_click", "preview_console"]) {
+  for (const tool of ["preview_read", "preview_screenshot", "preview_click", "preview_console"]) {
     assert.ok(workflow.routineAppTool(`mcp__coding-tools__${tool}`), tool);
   }
+  // A new address goes to the reviewer: the app trusts that review for it (permitOrigin).
+  assert.equal(workflow.routineAppTool("mcp__coding-tools__preview_open"), null, "preview_open is reviewed");
   for (const tool of ["get_goal", "create_goal", "update_goal"]) {
     assert.match(workflow.routineAppTool(`mcp__coding-tools__${tool}`), /chat's own goal/, tool);
   }

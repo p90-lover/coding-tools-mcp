@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const ts = require(require.resolve("typescript", { paths: [path.resolve(__dirname, "..")] }));
-const { DEFAULT_REDACT_LIST, acceptableSecret, chatDescriptionRedacted, hiddenMarker, redactList } = require("../electron/chat-redaction.cjs");
+const { DEFAULT_REDACT_LIST, acceptableSecret, chatDescriptionRedacted, hiddenMarker, redactList, redactHandoffCredentials } = require("../electron/chat-redaction.cjs");
 
 // The renderer's own parser, so the rewritten description is checked the way the chat reads it.
 const chat = (() => {
@@ -95,6 +95,24 @@ test("the label is one short line and the user's list is cleaned", () => {
   assert.equal(hiddenMarker(""), "[hidden: secret]");
   assert.deepEqual(redactList(undefined), [...DEFAULT_REDACT_LIST]);
   assert.deepEqual(redactList([" passwords ", "", "passwords", 3, "SSH keys"]), ["passwords", "SSH keys"]);
+});
+
+test("handoff redaction hides env-style names and common token prefixes, and leaves ordinary text alone", () => {
+  const hidden = "[hidden: credential]";
+  for (const [given, want] of [
+    ["DB_PASSWORD=hunter2hunter", `DB_PASSWORD=${hidden}`],
+    ["AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY", `AWS_SECRET_ACCESS_KEY=${hidden}`],
+    ['SECRET_KEY = "abcdefgh"', `SECRET_KEY = ${hidden}`],
+    ["GITHUB_TOKEN=ghx1234567890", `GITHUB_TOKEN=${hidden}`],
+    ["key sk_live_1234567890abcdefXYZ", `key ${hidden}`],
+    ["tok eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefghijk", `tok ${hidden}`],
+    ["glpat-abcdefghijklmnopqrstu", hidden],
+    [`npm_${"a".repeat(36)}`, hidden],
+  ]) assert.equal(redactHandoffCredentials(given), want, given);
+  for (const plain of ["max_tokens: 4096", "secret: true", "token_type: bearer", "input_tokens=12345",
+    "the password is in the vault", "password: ********", "api key: see docs"]) {
+    assert.equal(redactHandoffCredentials(plain), plain, plain);
+  }
 });
 
 test("the chat draws each hidden mark as its label", () => {
