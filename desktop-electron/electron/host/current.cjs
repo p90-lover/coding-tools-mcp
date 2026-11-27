@@ -1,7 +1,8 @@
 "use strict";
 
-// The host the app runs on (docs/specs/electron-host-seam-panes): main.cjs registers the one it
-// built at start; modules that cannot be handed it by argument, browser-host.cjs among them, ask
+// The host the app runs on (docs/specs/electron-host-seam-panes, -lifecycle): the entry
+// (main-with-provider.cjs) registers it at start, before the provider network and main.cjs load;
+// main.cjs and modules that cannot be handed it by argument, browser-host.cjs among them, ask
 // for it when they use a service. Electron's host today; the WebView2 host registers itself the same
 // way in phase 3, and those modules need no change.
 //
@@ -13,7 +14,7 @@ const { createElectronHost } = require("./electron-host.cjs");
 
 let registered = null;
 
-/** Registers the running app's host (main.cjs, once at start). */
+/** Registers the running app's host (the entry at start; main.cjs registers the same one again). */
 function setCurrentHost(host) {
   registered = host ?? null;
 }

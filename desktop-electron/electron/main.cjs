@@ -4,20 +4,16 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
+// Everything this file used from Electron comes through the host interface
+// (docs/specs/electron-host-seam, -windows, -panes, -lifecycle): Electron's today, a WebView2 host's
+// later. Only what the backend calls is there; the window and view classes are Electron's own until
+// then. The entry (main-with-provider.cjs) registers the host before this file loads; loaded alone,
+// this builds one. Registering it keeps browser-host.cjs, which asks for the current host, on it.
+const { currentHost, setCurrentHost } = require("./host/current.cjs");
+const runningHost = currentHost();
+setCurrentHost(runningHost);
 const {
-  app,
-  ipcMain,
-  net: electronNet,
-  webFrameMain,
-  webContents: electronWebContents,
-} = require("electron");
-// Desktop services, windows and browser panes come through the host interface
-// (docs/specs/electron-host-seam, -windows, -panes): Electron's today, a WebView2 host's later. Only
-// what the backend calls is there; the window and view classes are Electron's own until then. The
-// host is registered as the current one, which browser-host.cjs asks for when it needs a service.
-const runningHost = require("./host/electron-host.cjs").createElectronHost(require("electron"));
-require("./host/current.cjs").setCurrentHost(runningHost);
-const {
+  app, ipcMain, net: electronNet, webFrameMain, webContents: electronWebContents,
   clipboard, nativeTheme, Notification, safeStorage, shell, powerMonitor, powerSaveBlocker,
   BrowserWindow, BaseWindow, Tray, screen, dialog, Menu, nativeImage,
   WebContentsView, session,

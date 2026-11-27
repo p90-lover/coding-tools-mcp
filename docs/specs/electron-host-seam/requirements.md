@@ -76,11 +76,17 @@ Acceptance: WHEN slice 3 lands, `browser-host.cjs` SHALL NOT load `electron`, an
 pane SHALL keep its saved profile, cookies and scripts working as before.
 
 ### FR-5: App lifecycle behind the host interface (slice 4)
-`app` events, paths, single instance, protocol handlers, `ipcMain`, `net`, `webContents`,
-`webFrameMain`. Done when the backend starts with no Electron loaded.
+`app` events, paths, single instance, `ipcMain`, `net`, `webContents`, `webFrameMain` (the backend
+registers no protocol handlers). Done when no backend file outside `electron/host/` and the preload
+loads Electron (`docs/specs/electron-host-seam-lifecycle`).
 
-Acceptance: WHEN slice 4 lands, the backend SHALL start under plain Node with a stand-in host, and
-the existing test suites SHALL pass.
+Acceptance (revised in slice 4):
+- WHEN slice 4 lands, only `electron/host/` and `preload.cjs` SHALL load `electron` (the ratchet), and
+  the entry SHALL hand one registered host to the provider network and `main.cjs`, proven without
+  loading `main.cjs`; the existing test suites SHALL pass.
+- Starting the backend under plain Node on a stand-in host SHALL come with the phase 0/3 spike,
+  against a scratch profile: loading `main.cjs` creates folders, sets environment variables and
+  builds registries under the user's real data paths, so no test does it.
 
 ## 非功能需求 · Non-functional
 

@@ -1,16 +1,18 @@
 "use strict";
 
 // The host interface (docs/specs/electron-host-seam, slice 1: desktop services;
-// electron-host-seam-windows, slice 2: windows; electron-host-seam-panes, slice 3: browser panes):
-// the backend reaches these parts of Electron only through electron/host, and no file starts
-// loading Electron again. Phase 1 of the WebView2 plan; a Tauri host implements the same surface.
+// electron-host-seam-windows, slice 2: windows; electron-host-seam-panes, slice 3: browser panes;
+// electron-host-seam-lifecycle, slice 4: app lifecycle and IPC): the backend reaches Electron only
+// through electron/host, and no file starts loading Electron again. Phase 1 of the WebView2 plan; a
+// Tauri host implements the same surface.
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
 const Module = require("node:module");
-const { HOST_SERVICES, HOST_PROPERTIES, HOST_SPECIAL, HOST_CLASSES, createElectronHost } = require("../electron/host/electron-host.cjs");
+const { HOST_SERVICES, HOST_PROPERTIES, HOST_PROPERTY_METHODS, HOST_SPECIAL, HOST_CLASSES, createElectronHost } = require("../electron/host/electron-host.cjs");
 const { setCurrentHost, currentHost } = require("../electron/host/current.cjs");
 
 const ELECTRON_DIR = path.join(__dirname, "..", "electron");
@@ -42,6 +44,14 @@ function fakeElectron() {
     Tray: class FakeTray {},
     session: { ...service("session", HOST_SERVICES.session), defaultSession: { id: "default" }, fromPath: record("session.fromPath") },
     WebContentsView: class FakeWebContentsView {},
+    app: {
+      ...service("app", HOST_SERVICES.app), setBadgeCount: record("app.setBadgeCount"), isPackaged: false,
+      commandLine: { appendSwitch: record("app.commandLine.appendSwitch"), hasSwitch: record("app.commandLine.hasSwitch") },
+    },
+    ipcMain: { ...service("ipcMain", HOST_SERVICES.ipcMain), removeHandler: record("ipcMain.removeHandler") },
+    net: { ...service("net", HOST_SERVICES.net), fetch: record("net.fetch") },
+    webContents: { ...service("webContents", HOST_SERVICES.webContents), fromId: record("webContents.fromId") },
+    webFrameMain: service("webFrameMain", HOST_SERVICES.webFrameMain),
   };
   return { electron, calls };
 }
@@ -128,6 +138,70 @@ test("browser panes: WebContentsView is Electron's own, session gives fromPartit
   assert.deepEqual(host.session.defaultSession, { id: "replaced" }, "read from Electron each time, never copied");
 });
 
+test("app lifecycle: app gives its listed methods, reads isPackaged and commandLine when read, and commandLine offers only appendSwitch", () => {
+  const { electron, calls } = fakeElectron();
+  const host = createElectronHost(electron);
+  assert.equal(host.app.setBadgeCount, undefined, "an app method the backend doesn't call is not there");
+  assert.equal(host.app.getPath("userData"), "app.getPath-result");
+  assert.equal(calls.at(-1).self, electron.app, "Electron's app runs its own method");
+  assert.equal(host.app.isPackaged, false);
+  electron.app.isPackaged = true;
+  assert.equal(host.app.isPackaged, true, "read from Electron each time, never copied");
+
+  assert.deepEqual(Object.keys(host.app.commandLine), HOST_PROPERTY_METHODS.app.commandLine);
+  assert.equal(host.app.commandLine.hasSwitch, undefined, "Chromium switches are appended, never read");
+  host.app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
+  assert.deepEqual([calls.at(-1).name, calls.at(-1).args], ["app.commandLine.appendSwitch", ["disable-gpu-shader-disk-cache"]]);
+  assert.equal(calls.at(-1).self, electron.app.commandLine);
+
+  assert.equal(host.ipcMain.removeHandler, undefined);
+  assert.equal(host.net.fetch, undefined);
+  assert.equal(host.webContents.fromId, undefined);
+  host.ipcMain.handle("launcher:get-state", () => {});
+  host.net.request("https://example.com/");
+  host.webContents.getAllWebContents();
+  host.webFrameMain.fromId(4, 2);
+  assert.deepEqual(calls.slice(-4).map(({ name, args }) => [name, args.length]), [
+    ["ipcMain.handle", 2], ["net.request", 1], ["webContents.getAllWebContents", 0], ["webFrameMain.fromId", 2],
+  ]);
+});
+
+test("the entry registers one host before the provider network and main.cjs load, and loads no Electron itself", () => {
+  const filename = path.join(ELECTRON_DIR, "main-with-provider.cjs");
+  const built = createElectronHost(fakeElectron().electron);
+  const order = [];
+  let registered = null;
+  const modules = {
+    "./agent-session-env.cjs": { cleanAgentSessionEnvironment: () => order.push("clean environment") },
+    "./host/current.cjs": {
+      currentHost: () => registered ?? (order.push("build host"), built),
+      setCurrentHost: (host) => { order.push("register host"); registered = host; },
+    },
+    "./provider-bootstrap.cjs": {
+      installProviderNetwork: (host) => order.push(host === registered ? "provider network on the registered host" : "provider network on another host"),
+    },
+  };
+  const load = (name) => {
+    if (name === "./main.cjs") { order.push(registered === built ? "main.cjs with the host registered" : "main.cjs before the host"); return {}; }
+    if (Object.hasOwn(modules, name)) return modules[name];
+    throw new Error(`the entry loads ${name}`);
+  };
+  vm.runInNewContext(fs.readFileSync(filename, "utf8"), { require: load, module: { exports: {} } }, { filename });
+  assert.deepEqual(order, [
+    "clean environment", "build host", "register host", "provider network on the registered host", "main.cjs with the host registered",
+  ]);
+});
+
+test("every name main.cjs takes from its host is on the host", () => {
+  const source = fs.readFileSync(path.join(ELECTRON_DIR, "main.cjs"), "utf8");
+  const destructured = source.match(/const\s*\{([^}]*)\}\s*=\s*runningHost\s*;/);
+  assert.ok(destructured, "main.cjs takes its Electron names from runningHost");
+  const names = destructured[1].split(",").map((part) => part.trim().split(":")[0].trim()).filter(Boolean);
+  const host = createElectronHost(fakeElectron().electron);
+  for (const name of names) assert.ok(host[name], `main.cjs takes ${name}, which the host does not have`);
+  assert.match(source, /const runningHost = currentHost\(\);\s*setCurrentHost\(runningHost\);/, "the host comes from current.cjs");
+});
+
 test("the current host: the one main.cjs registers, else one built from require('electron') at that moment", (t) => {
   t.after(() => setCurrentHost(null));
   // Nothing registered, under plain Node: require("electron") is a path, so every service is null.
@@ -155,27 +229,34 @@ test("building the host reads no service method; each is looked up when the back
   // happened at use; so do these.
   const reads = [];
   const watched = new Proxy({ on: () => "on" }, { get(target, key) { reads.push(String(key)); return target[key]; } });
-  const host = createElectronHost({ powerMonitor: watched });
+  const appReads = [];
+  const watchedApp = new Proxy({ isReady: () => false, isPackaged: true, commandLine: { appendSwitch: () => {} } },
+    { get(target, key) { appReads.push(String(key)); return target[key]; } });
+  const host = createElectronHost({ powerMonitor: watched, app: watchedApp });
   assert.deepEqual(reads, [], "nothing read while building");
+  assert.deepEqual(appReads, [], "nothing of app read while building");
   assert.equal(typeof host.powerMonitor.on, "function");
   assert.equal(host.powerMonitor.on("resume", () => {}), "on");
   assert.ok(reads.includes("on"), "read when used");
+  assert.equal(typeof host.app.commandLine.appendSwitch, "function");
+  assert.deepEqual(appReads, ["commandLine"], "app's command line read when used");
 });
 
 // The ratchet. Files that may still load Electron, and the names each may still import from it; each
 // slice of the seam removes entries, never adds them. Slice 1 moved the desktop services.
 const MAY_LOAD_ELECTRON = new Map([
   // Slice 2 moved BrowserWindow, BaseWindow, Tray, screen, dialog, Menu and nativeImage; slice 3
-  // WebContentsView and session. browser-host.cjs left this list in slice 3.
-  ["main.cjs", ["app", "ipcMain", "net", "webFrameMain", "webContents"]],
-  ["main-with-provider.cjs", null],
+  // WebContentsView and session (browser-host.cjs left this list); slice 4 app, ipcMain, net,
+  // webContents and webFrameMain (main.cjs and the entry, main-with-provider.cjs, left it).
   // The Electron implementation of the host interface: the one place Electron belongs.
   ["host/electron-host.cjs", null],
   ["host/current.cjs", null],
+  // The renderer side: phase 2 moves the bridge to a WebSocket.
   ["preload.cjs", ["contextBridge", "ipcRenderer", "webUtils"]],
 ]);
 const MOVED_BEHIND_HOST = ["clipboard", "nativeTheme", "Notification", "safeStorage", "shell", "powerMonitor", "powerSaveBlocker",
-  "BrowserWindow", "BaseWindow", "Tray", "screen", "dialog", "Menu", "nativeImage", "WebContentsView", "session"];
+  "BrowserWindow", "BaseWindow", "Tray", "screen", "dialog", "Menu", "nativeImage", "WebContentsView", "session",
+  "app", "ipcMain", "net", "webContents", "webFrameMain"];
 
 function backendFiles(dir, base = dir) {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {

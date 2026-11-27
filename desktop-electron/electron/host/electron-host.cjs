@@ -1,8 +1,8 @@
 "use strict";
 
-// The backend's one door to Electron's desktop services and windows (docs/specs/electron-host-seam
-// and electron-host-seam-windows: slices 1 and 2 of the WebView2 plan's phase 1). It hands out the
-// methods the backend actually calls, under
+// The backend's one door to Electron (docs/specs/electron-host-seam and its slices -windows,
+// -panes, -lifecycle: phase 1 of the WebView2 plan). It hands out the desktop services, windows,
+// browser panes, app lifecycle and IPC the backend actually calls, under
 // Electron's own names, and nothing else: call sites keep working unchanged, a new use of another
 // Electron method fails in tests instead of tying the backend to Electron again, and the coming
 // Tauri / WebView2 host implements this same small surface.
@@ -25,10 +25,31 @@ const HOST_SERVICES = Object.freeze({
   nativeImage: Object.freeze(["createFromPath", "createFromDataURL"]),
   // Slice 3 (docs/specs/electron-host-seam-panes): the browser panes' sessions.
   session: Object.freeze(["fromPartition"]),
+  // Slice 4 (docs/specs/electron-host-seam-lifecycle): the app lifecycle and IPC. `app` is also
+  // passed on (autostart, runtime, smoke-exit, ...); the list covers those uses too.
+  app: Object.freeze([
+    "getPath", "getVersion", "on", "once", "exit", "quit", "relaunch", "whenReady", "isReady",
+    "getAppMetrics", "getFileIcon", "requestSingleInstanceLock", "setName", "setPath", "setAppLogsPath",
+    "setAppUserModelId", "getLoginItemSettings", "setLoginItemSettings", "setAccessibilitySupportEnabled",
+    "isAccessibilitySupportEnabled", "getAccessibilitySupportFeatures",
+  ]),
+  ipcMain: Object.freeze(["handle", "on"]),
+  net: Object.freeze(["request"]),
+  webContents: Object.freeze(["getAllWebContents"]),
+  webFrameMain: Object.freeze(["fromId"]),
 });
 /** Properties forwarded as read-only getters, read when the backend reads them. */
 const HOST_PROPERTIES = Object.freeze({
   session: Object.freeze(["defaultSession"]),
+  app: Object.freeze(["isPackaged", "commandLine"]),
+});
+/**
+ * Forwarded properties that are services themselves: each read gives the listed methods of what
+ * Electron has there at that moment. Chromium switches are the backend's only command-line use,
+ * which a WebView2 host turns into the browser arguments it starts with.
+ */
+const HOST_PROPERTY_METHODS = Object.freeze({
+  app: Object.freeze({ commandLine: Object.freeze(["appendSwitch"]) }),
 });
 /**
  * The window classes pass through as Electron's own (slice 2): their instances must stay real
@@ -53,9 +74,10 @@ const HOST_SPECIAL = Object.freeze({
  * looked up when it is read, as the callers' own `powerMonitor.on` was: some of Electron's
  * services must not be touched before the app is ready, and building the host happens at load.
  * A method the source lacks reads as undefined. `properties` are forwarded read-only, also read
- * when read (Electron's `session.defaultSession`).
+ * when read (Electron's `session.defaultSession`, `app.isPackaged`); one named in `propertyMethods`
+ * is itself picked to those methods (`app.commandLine`).
  */
-function pick(source, methods, properties = []) {
+function pick(source, methods, properties = [], propertyMethods = {}) {
   if (!source || (typeof source !== "object" && typeof source !== "function")) return null;
   const picked = {};
   for (const name of methods) {
@@ -64,7 +86,10 @@ function pick(source, methods, properties = []) {
       get: () => (typeof source[name] === "function" ? (...args) => source[name](...args) : undefined),
     });
   }
-  for (const name of properties) Object.defineProperty(picked, name, { enumerable: true, get: () => source[name] });
+  for (const name of properties) {
+    const inner = propertyMethods[name];
+    Object.defineProperty(picked, name, { enumerable: true, get: () => (inner ? pick(source[name], inner) : source[name]) });
+  }
   return Object.freeze(picked);
 }
 
@@ -118,6 +143,11 @@ function createElectronHost(electron) {
     Tray: classOf(api.Tray),
     session: pick(api.session, HOST_SERVICES.session, HOST_PROPERTIES.session),
     WebContentsView: classOf(api.WebContentsView),
+    app: pick(api.app, HOST_SERVICES.app, HOST_PROPERTIES.app, HOST_PROPERTY_METHODS.app),
+    ipcMain: pick(api.ipcMain, HOST_SERVICES.ipcMain),
+    net: pick(api.net, HOST_SERVICES.net),
+    webContents: pick(api.webContents, HOST_SERVICES.webContents),
+    webFrameMain: pick(api.webFrameMain, HOST_SERVICES.webFrameMain),
   });
 }
 
@@ -129,4 +159,4 @@ function classOf(Native) {
 // No shared instance: each caller builds its host from the require("electron") it loaded, as it
 // destructured Electron before. A test that reloads a module with another Electron stand-in then
 // gets that stand-in's services, not a previous one's.
-module.exports = { HOST_SERVICES, HOST_PROPERTIES, HOST_SPECIAL, HOST_CLASSES, createElectronHost };
+module.exports = { HOST_SERVICES, HOST_PROPERTIES, HOST_PROPERTY_METHODS, HOST_SPECIAL, HOST_CLASSES, createElectronHost };
