@@ -9,7 +9,7 @@ const {
   WM_SETTINGCHANGE,
   FIRST_CHECK_MS,
   CHANGE_SETTLE_MS,
-  SCREEN_READER_SCRIPT,
+  SCREEN_READER_KEY,
   accessibilityMode,
   blocksAtLaunch,
   applyLaunchSwitch,
@@ -168,20 +168,22 @@ test("a launch in off mode stays off and never checks for a screen reader", asyn
   assert.deepEqual(app.calls, []);
 });
 
-test("Windows' flag is read off the main thread through PowerShell and parsed", async () => {
+test("Windows' flag is read off the main thread from the user's profile with reg.exe, never PowerShell", async () => {
+  // An encoded PowerShell script building a P/Invoke stub in memory read it before 2026-11-27, when
+  // Bitdefender's behaviour monitor quarantined the app.
   const runs = [];
   const run = (stdout, error = null) => (file, args, options, callback) => { runs.push({ file, args, options }); callback(error, stdout, ""); };
-  assert.equal(await readScreenReaderFlag(run("screenReader=1\r\n")), true);
-  assert.equal(await readScreenReaderFlag(run("screenReader=0\r\n")), false);
-  assert.equal(await readScreenReaderFlag(run("screenReader=unknown\r\n")), null);
-  assert.equal(await readScreenReaderFlag(run("", new Error("powershell.exe exited with 1"))), null);
+  const reply = (value, type = "REG_SZ") => `\r\nHKEY_CURRENT_USER\\Control Panel\\Accessibility\\Blind Access\r\n    On    ${type}    ${value}\r\n\r\n`;
+  assert.equal(await readScreenReaderFlag(run(reply("1"))), true);
+  assert.equal(await readScreenReaderFlag(run(reply("0"))), false);
+  assert.equal(await readScreenReaderFlag(run(reply("0x1", "REG_DWORD"))), true);
+  assert.equal(await readScreenReaderFlag(run(reply("yes"))), null, "a value it can't read says nothing");
+  assert.equal(await readScreenReaderFlag(run("", new Error("reg.exe exited with 1"))), null);
   const { file, args, options } = runs[0];
-  assert.match(file, /WindowsPowerShell[\\/]v1\.0[\\/]powershell\.exe$/i);
-  assert.equal(Buffer.from(args[args.indexOf("-EncodedCommand") + 1], "base64").toString("utf16le"), SCREEN_READER_SCRIPT);
-  assert.ok(options.timeout > 0);
-  // No Add-Type: it would start the C# compiler on every launch.
-  assert.equal(/Add-Type/i.test(SCREEN_READER_SCRIPT), false);
-  assert.match(SCREEN_READER_SCRIPT, /SetImplementationFlags\('PreserveSig'\)/);
+  assert.match(file, /System32[\\/]reg\.exe$/i);
+  assert.deepEqual(args, ["query", SCREEN_READER_KEY, "/v", "On"]);
+  assert.equal(SCREEN_READER_KEY, "HKCU\\Control Panel\\Accessibility\\Blind Access");
+  assert.ok(options.timeout > 0 && options.windowsHide);
 });
 
 test("the state store keeps a valid saved mode, drops any other, and the launch reads what it saved", async () => {

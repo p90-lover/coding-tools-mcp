@@ -17,6 +17,11 @@ const MAX_KEY_BYTES = 64 * 1024;
 const MAX_CONNECTOR_BINDINGS = 64;
 const TIMING = Object.freeze({
   monitorMs: 10_000,
+  // While every tunnel is ready and its process alive, the inventory (a tunnel-client start) runs
+  // this often; anything not ready brings it back to every monitorMs. It ran every 10 s for as long
+  // as the app did (7,000 starts in 19 h): Bitdefender's behaviour monitor scored that with the rest
+  // and quarantined the app (2026-11-27).
+  inventoryMs: 5 * 60_000,
   pollMs: 1_000,
   startTimeoutMs: 120_000,
   failureThreshold: 3,
@@ -51,6 +56,12 @@ function connectorBinding(value, tunnelId, href = value?.href) {
   return { userId: value.userId, workspaceId: value.workspaceId, tunnelId, href: url.pathname };
 }
 
+/** Whether process `pid` exists, without starting anything (EPERM: it exists, owned by someone else). */
+function processAlive(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return error?.code === "EPERM"; }
+}
+
 /** tunnel-client's local inventory as alias → { state, ready, pid }. */
 function parseInventory(output) {
   const parsed = JSON.parse(output);
@@ -70,7 +81,10 @@ class ExtraTunnels {
    * runTunnel(tunnel, args, timeoutMs, label) runs the tunnel CLI for one tunnel config (off the main thread);
    * connectArgs(config, tunnel) builds `runtimes connect` for it with the bridge's MCP command.
    */
-  constructor({ coreHome, logger, runTunnel, connectArgs, diagnostic, absent, onChange, timing }) {
+  constructor({ coreHome, logger, runTunnel, connectArgs, diagnostic, absent, onChange, timing, alive = processAlive, now = Date.now }) {
+    this.alive = alive;
+    this.now = now;
+    this.lastInventoryAt = 0;
     this.registryPath = path.join(coreHome, "tunnel", "extra-tunnels.json");
     this.secretsDir = path.join(coreHome, "secrets");
     this.logger = logger;
@@ -259,18 +273,35 @@ class ExtraTunnels {
     this.monitorTimer = null;
   }
 
+  /**
+   * Whether this pass can skip the inventory: the last one is under inventoryMs old and every
+   * monitored tunnel was ready then, with no failure since, and its process still runs. A tunnel
+   * without a known pid, or one whose process is gone, is inventoried now.
+   */
+  quiet() {
+    if (!this.lastInventoryAt || this.now() - this.lastInventoryAt >= this.timing.inventoryMs) return false;
+    for (const entry of this.entries()) {
+      const runtime = this.runtime.get(entry.id);
+      if (!runtime || runtime.state === "starting" || runtime.state === "failed") continue;
+      if (runtime.state !== "ready" || runtime.failures || !Number.isInteger(runtime.pid) || !this.alive(runtime.pid)) return false;
+    }
+    return true;
+  }
+
   /** One monitor pass: a tunnel seen not ready this many times in a row is restarted, a few times a minute at most. */
   async check() {
     const config = this.config;
     if (!config || this.monitorInFlight) return;
     this.monitorInFlight = true;
     try {
+      if (this.quiet()) return;
       let inventory;
       try {
         inventory = await this.inventory(config);
       } catch {
         return; // an unknown observation is no evidence of failure
       }
+      this.lastInventoryAt = this.now();
       for (const entry of this.entries()) {
         const runtime = this.runtime.get(entry.id);
         if (!runtime || runtime.state === "starting" || runtime.state === "failed") continue;
@@ -278,6 +309,9 @@ class ExtraTunnels {
         if (seen?.ready) {
           if (runtime.state !== "ready" || runtime.failures) this.runtime.set(entry.id, { ...runtime, failures: 0 });
           if (runtime.state !== "ready") this.setState(entry.id, "ready", "Connected", seen.pid);
+          // A tunnel that restarted on its own keeps its state with a new process: the quiet passes
+          // between inventories check that one (quiet()).
+          else if (seen.pid && seen.pid !== runtime.pid) this.runtime.set(entry.id, { ...this.runtime.get(entry.id), pid: seen.pid });
           continue;
         }
         const failures = runtime.failures + 1;

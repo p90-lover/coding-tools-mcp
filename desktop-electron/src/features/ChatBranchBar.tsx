@@ -20,7 +20,10 @@ export type ChatBranches = {
 
 type ModuleReply = { ok?: boolean; result?: unknown };
 
-const REFRESH_MS = 15_000;
+// One read starts about a dozen git processes (agent-orchestrator-workspace.cjs branches), from the
+// app itself: every 15 s per bar was a steady stream of program starts that Bitdefender's behaviour
+// monitor scored against the unsigned app (2026-11-27 quarantine). Focus and the menu still read at once.
+const REFRESH_MS = 60_000;
 
 /** How long ago the branch's tip was committed: "5m", "3h", "4d", "8w", "5mo". */
 function ago(iso: string | null) {

@@ -25,24 +25,22 @@ const { execFileOffThread } = require("./off-thread-run.cjs");
 
 const MODES = Object.freeze(["auto", "on", "off"]);
 const WM_SETTINGCHANGE = 0x001a;
-const SPI_GETSCREENREADER = 0x0046;
 const SPI_SETSCREENREADER = 0x0047;
 // The first check waits until the window is up and the launch's own work has eased.
 const FIRST_CHECK_MS = 10_000;
 // A screen reader that starts or quits can send several changes; one check follows the last.
 const CHANGE_SETTLE_MS = 1_000;
 
-const POWERSHELL = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-// SystemParametersInfoW through a P/Invoke stub built in memory: Add-Type would start the C#
-// compiler. PreserveSig keeps the BOOL return a BOOL (without it the call reads as failed).
-const SCREEN_READER_SCRIPT = [
-  "$b = [AppDomain]::CurrentDomain.DefineDynamicAssembly((New-Object Reflection.AssemblyName 'ctSpi'), 'Run').DefineDynamicModule('ctSpi').DefineType('ctSpi', 'Public,Class')",
-  "$m = $b.DefinePInvokeMethod('SystemParametersInfoW', 'user32.dll', 'Public,Static,PinvokeImpl', 'Standard', [bool], [Type[]]@([uint32], [uint32], [int].MakeByRefType(), [uint32]), 'Winapi', 'Unicode')",
-  "$m.SetImplementationFlags('PreserveSig')",
-  "$t = $b.CreateType()",
-  "$on = 0",
-  `if ($t::SystemParametersInfoW(${SPI_GETSCREENREADER}, 0, [ref]$on, 0)) { "screenReader=$on" } else { 'screenReader=unknown' }`,
-].join("\n");
+const REG = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "reg.exe");
+// Where Windows keeps the screen reader flag in the user's profile: a screen reader sets it with
+// SPI_SETSCREENREADER and SPIF_UPDATEINIFILE (NVDA's setSystemScreenReaderFlag does), which writes
+// this value, and SPIF_SENDCHANGE, which sends the WM_SETTINGCHANGE watchWindow hears.
+//
+// It was read with SystemParametersInfoW through PowerShell: an encoded script that built a P/Invoke
+// stub in memory (DefineDynamicAssembly, DefinePInvokeMethod on user32.dll). That is the shape of
+// PowerShell attack tooling, and Bitdefender reads PowerShell scripts through AMSI: its behaviour
+// monitor quarantined the app on 2026-11-27 (app-processes.cjs runPowerShell). reg.exe reads one value.
+const SCREEN_READER_KEY = "HKCU\\Control Panel\\Accessibility\\Blind Access";
 
 /** A saved mode, or "auto" for anything else. */
 function accessibilityMode(value) {
@@ -70,15 +68,13 @@ function applyLaunchSwitch(app, statePath, { platform = process.platform, readFi
 
 /** Windows' screen reader flag: true, false, or null when it could not be read. */
 function readScreenReaderFlag(run = execFileOffThread) {
-  const encoded = Buffer.from(SCREEN_READER_SCRIPT, "utf16le").toString("base64");
   return new Promise((resolve) => {
-    // No `-ExecutionPolicy Bypass`: it does nothing for an inline command, and it is one of the marks
-    // an antivirus scores as malware (app-processes.cjs runPowerShell, 2026-11-27).
-    run(POWERSHELL, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-      { windowsHide: true, timeout: 20_000, maxBuffer: 64 * 1024 },
+    run(REG, ["query", SCREEN_READER_KEY, "/v", "On"], { windowsHide: true, timeout: 20_000, maxBuffer: 64 * 1024 },
       (error, stdout) => {
-        const found = error ? null : /screenReader=(\d+)/.exec(String(stdout ?? ""));
-        resolve(found ? Number(found[1]) !== 0 : null);
+        // "    On    REG_SZ    1" (a DWORD reads "0x1").
+        const found = error ? null : /^\s*On\s+REG_\w+\s+(\S+)\s*$/m.exec(String(stdout ?? ""));
+        const value = found ? Number(found[1]) : NaN;
+        resolve(Number.isFinite(value) ? value !== 0 : null);
       });
   });
 }
@@ -189,7 +185,7 @@ module.exports = {
   SPI_SETSCREENREADER,
   FIRST_CHECK_MS,
   CHANGE_SETTLE_MS,
-  SCREEN_READER_SCRIPT,
+  SCREEN_READER_KEY,
   accessibilityMode,
   blocksAtLaunch,
   applyLaunchSwitch,
