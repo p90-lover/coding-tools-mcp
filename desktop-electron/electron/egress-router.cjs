@@ -21,7 +21,7 @@ function routerWorkerMain() {
   const tls = require("node:tls");
   const { parentPort, workerData } = require("node:worker_threads");
   const { key, tunnelIdleMs, connectTimeoutMs, requestIdleMs } = workerData;
-  let table = workerData.table || { tokens: {}, targets: {} };
+  let table = null;
   const post = (message) => { try { parentPort.postMessage(message); } catch { /* main is gone */ } };
 
   // ---- per-target bookkeeping -------------------------------------------------------------
@@ -358,12 +358,14 @@ function routerWorkerMain() {
     }
     post({ type: "error", message: error.message });
   });
-  // The callback also fires when the retry on a free port (above) succeeds.
-  main.listen(workerData.port || 0, "127.0.0.1", () => post({ type: "ready", port: main.address().port }));
-
   parentPort.on("message", (message) => {
     if (message?.type === "routes") {
+      const starting = table === null;
       table = message.table || { tokens: {}, targets: {} };
+      if (starting) {
+        // A replacement must receive the current table before clients can reconnect to its port.
+        main.listen(workerData.port || 0, "127.0.0.1", () => post({ type: "ready", port: main.address().port }));
+      }
     } else if (message?.type === "reconnect") {
       const targets = message.target ? [message.target] : [...sockets.keys()];
       let closed = 0;
@@ -418,19 +420,26 @@ function startEgressRouter({
   if (typeof key !== "string" || key.length < 32) return Promise.reject(new Error("The egress router needs its key"));
   let current = table;
   let worker = null;
+  let ready = false;
   let livePort = Number(port) || 0;
   let closed = false;
   let nextId = 1;
   const pending = new Map();
   const restarts = [];
   const emit = (event) => { try { onEvent(event); } catch { /* a listener's fault is not the router's */ } };
+  const clearPending = (message) => {
+    const error = new Error(message);
+    for (const waiter of pending.values()) waiter.reject(error);
+    pending.clear();
+  };
 
   function launch() {
     return new Promise((resolve, reject) => {
       const created = createWorker(ROUTER_WORKER_SOURCE, {
         eval: true,
-        workerData: { port: livePort, key, table: current, tunnelIdleMs, connectTimeoutMs, requestIdleMs },
+        workerData: { port: livePort, key, tunnelIdleMs, connectTimeoutMs, requestIdleMs },
       });
+      worker = created;
       let settled = false;
       const timer = setTimeout(() => fail(new Error("The egress router did not start")), readyTimeoutMs);
       timer.unref?.();
@@ -438,16 +447,20 @@ function startEgressRouter({
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        void Promise.resolve(created.terminate?.()).catch(() => {});
+        if (worker === created) {
+          worker = null;
+          void Promise.resolve(created.terminate?.()).catch(() => {});
+        }
         reject(error);
       }
       created.on("message", (message) => {
+        if (worker !== created) return;
         if (message?.type === "ready" && Number.isInteger(message.port)) {
           if (!settled) {
             settled = true;
             clearTimeout(timer);
             livePort = message.port;
-            worker = created;
+            ready = true;
             resolve(message.port);
           }
           return;
@@ -462,28 +475,34 @@ function startEgressRouter({
         }
         emit(message);
       });
-      created.on("error", (error) => { if (!settled) fail(error); else emit({ type: "error", message: error?.message }); });
+      created.on("error", (error) => {
+        if (!settled) fail(error);
+        else if (worker === created) emit({ type: "error", message: error?.message });
+      });
       created.on("exit", (code) => {
         if (!settled) { fail(new Error(`The egress router exited (${code})`)); return; }
         if (worker !== created) return;
         worker = null;
-        for (const waiter of pending.values()) waiter.reject(new Error("The egress router stopped"));
-        pending.clear();
+        ready = false;
+        clearPending("The egress router stopped");
         if (closed) return;
         const now = Date.now();
         while (restarts.length && now - restarts[0] > 10 * 60_000) restarts.shift();
         if (restarts.length >= maxRestarts) { emit({ type: "stopped", code }); return; }
         restarts.push(now);
-        launch().then((restartedPort) => emit({ type: "restarted", port: restartedPort }),
-          (error) => emit({ type: "stopped", code, message: error?.message }));
+        launch().then(
+          (restartedPort) => { if (!closed) emit({ type: "restarted", port: restartedPort }); },
+          (error) => { if (!closed) emit({ type: "stopped", code, message: error?.message }); },
+        );
       });
       // The router never keeps a quitting app alive.
       created.unref?.();
+      try { created.postMessage({ type: "routes", table: current }); } catch (error) { fail(error); }
     });
   }
 
   function ask(type, payload = {}) {
-    if (!worker) return Promise.reject(new Error("The egress router is not running"));
+    if (!ready) return Promise.reject(new Error("The egress router is not running"));
     const id = nextId++;
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
@@ -493,7 +512,7 @@ function startEgressRouter({
 
   return launch().then(() => ({
     get port() { return livePort; },
-    get running() { return Boolean(worker); },
+    get running() { return ready; },
     setRoutes(next) {
       current = next || { tokens: {}, targets: {} };
       try { worker?.postMessage({ type: "routes", table: current }); } catch { /* restarted with `current` */ }
@@ -509,6 +528,8 @@ function startEgressRouter({
       closed = true;
       const ending = worker;
       worker = null;
+      ready = false;
+      clearPending("The egress router closed");
       try { ending?.postMessage({ type: "close" }); } catch { /* already gone */ }
       return Promise.resolve(ending?.terminate?.()).then(() => {}, () => {});
     },

@@ -3,6 +3,7 @@
 // site as destinations, an HTTP proxy that requires a sign-in, and a SOCKS5 proxy with
 // username/password. Nothing leaves the machine.
 const assert = require("node:assert/strict");
+const { EventEmitter } = require("node:events");
 const http = require("node:http");
 const net = require("node:net");
 const test = require("node:test");
@@ -233,21 +234,52 @@ test("an open port serves one fixed target without a sign-in, until it is closed
   await assert.rejects(connectThrough(port, null, "127.0.0.1", destination.port));
 });
 
-test("a router that stops on its own comes back on the same port with the last table", async (t) => {
+test("a router that stops on its own comes back on the same port with a route set during restart", { timeout: 15_000 }, async (t) => {
   const destination = await echoServer();
   const key = newRouterKey();
   const workers = [];
   const { Worker } = require("node:worker_threads");
-  const events = [];
-  const router = await startEgressRouter({ key, table: table({ app: { mode: "broken", reason: "old" } }), onEvent: (event) => events.push(event),
-    createWorker: (source, options) => { const worker = new Worker(source, options); workers.push(worker); return worker; } });
+  const restarted = Promise.withResolvers();
+  const router = await startEgressRouter({
+    key, table: table({ app: { mode: "direct" } }),
+    onEvent: (event) => { if (event.type === "restarted") restarted.resolve(event); },
+    createWorker(source, options) {
+      const worker = new Worker(source, options);
+      workers.push(worker);
+      if (workers.length === 2) router.setRoutes(table({ app: { mode: "broken", reason: "New route is unavailable" } }));
+      return worker;
+    },
+  });
   t.after(async () => { await router.close(); destination.server.close(); });
-  router.setRoutes(table({ app: { mode: "direct" } }));
   const port = router.port;
   await workers[0].terminate();
-  for (let tries = 0; tries < 100 && !events.some((event) => event.type === "restarted"); tries++) await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.deepEqual(events.find((event) => event.type === "restarted"), { type: "restarted", port });
+  assert.deepEqual(await restarted.promise, { type: "restarted", port });
   const again = await connectThrough(router.port, auth("app", key), "127.0.0.1", destination.port);
-  assert.equal(again.status, 200, "the restarted router has the latest table, not the first one");
   again.socket.destroy();
+  assert.equal(again.status, 502, "the replacement uses the new route, not its startup snapshot");
+  assert.equal(destination.seen.connections, 0, "an unavailable route does not go direct");
+});
+
+test("closing the egress router cancels a replacement that has not listened yet", async () => {
+  const workers = [];
+  const events = [];
+  const started = startEgressRouter({
+    key: newRouterKey(), onEvent: (event) => events.push(event),
+    createWorker() {
+      const worker = new EventEmitter();
+      worker.postMessage = () => {};
+      worker.terminate = async () => { worker.terminated = true; worker.emit("exit", 0); };
+      workers.push(worker);
+      return worker;
+    },
+  });
+  workers[0].emit("message", { type: "ready", port: 17555 });
+  const router = await started;
+  workers[0].emit("exit", 1);
+  assert.equal(workers.length, 2);
+  assert.equal(router.running, false);
+  await router.close();
+  assert.equal(workers[1].terminated, true, "the starting worker is still owned and stopped");
+  assert.equal(router.running, false);
+  assert.deepEqual(events, [], "intentional close does not announce a restart or error");
 });
