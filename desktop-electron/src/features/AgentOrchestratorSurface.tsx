@@ -1355,6 +1355,9 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
           setTeam((previous) => JSON.stringify(previous) === JSON.stringify(team) ? previous : team);
           setSavedTeams((previous) => JSON.stringify(previous) === JSON.stringify(saved) ? previous : saved);
           setTaskLifecycle((previous) => JSON.stringify(previous) === JSON.stringify(lifecycle) ? previous : lifecycle);
+          // The app sends queued messages itself (chat-queue.cjs), with no message to this view: this
+          // read is how a message it sent leaves the queued-message bar.
+          if (current.queues && typeof current.queues === "object") syncChatQueues(workspaceId, current.queues as Record<string, QueuedChatMessage[]>);
         }
       }).catch(() => {}).finally(() => { reading = false; });
     };
