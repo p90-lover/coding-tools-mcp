@@ -139,6 +139,17 @@ function pullRequestFrom(text) {
 // capability, which would fail the whole session, so they launch without these tools.
 const MCP_HTTP_AGENTS = new Set(["claude-code", "codex", "opencode"]);
 const WORKSPACE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+// Connect an app: another local app (SHA, Shadow SHA) the person allowed in Coding Tools' window gets
+// its own credential, rooted at the project folder chosen then, with no AO session or chat behind it.
+// Its tools are the agent's files and commands in that folder and computer use; never the preview,
+// subagents, other chats or the app's own controls, which belong to a chat.
+const APP_ID = /^[a-z][a-z0-9-]{1,31}$/;
+const APP_GROUPS = new Set(["agent", "terminal", "desktop"]);
+const APP_MAX_IDLE_MS = 30 * 24 * 60 * 60_000;
+const APP_LOCAL_TOOLS = new Set(["list_commands", "computer_guide"]);
+const appRecord = (value) => APP_ID.test(String(value?.id)) && typeof value?.name === "string" && value.name.length > 0
+  && value.name.length <= 60 && typeof value?.program === "string" && path.win32.isAbsolute(value.program) && value.program.length <= 400
+  ? { id: value.id, name: value.name.replace(/[\r\n]/g, " "), program: value.program } : null;
 const SESSION_KEY = /^[A-Za-z0-9_-]{16,64}$/;
 const SESSION_ID = /^(?:[a-zA-Z0-9_-]{1,128}|native:[^:\s]{1,1152}:[^:\s]{1,1152}:[^:\s]{1,1152})$/;
 function nativeChatPreviewSessionId(workspaceId, taskId, roleId = "single") {
@@ -1513,6 +1524,9 @@ function tooLongToShow(name) {
 
 function createChatAgentTools({
   requestHeadless, sessionWorkspace = null, confirm = null,
+  // Connect an app (main.cjs): ({ id, name, peerPort, serverPort }) → { workspaceId, root, project,
+  // program } once the person allowed it in Coding Tools' window, or null.
+  pairApp = null,
   enabled = () => true, terminalEnabled = () => false, desktopEnabled = () => false,
   // The chat's own browser (chat-preview.cjs), on unless the user turns it off.
   previews = null, previewEnabled = () => true,
@@ -1634,6 +1648,10 @@ function createChatAgentTools({
     entry.expected = null;
     entry.lifetime.abort();
     save();
+    // "Allow until it disconnects": the app's own computer use answers go with its key.
+    if (entry.app && ![...sessions.values()].some((other) => other.app?.id === entry.app.id)) {
+      try { computerControl?.forgetConversation?.(entry.workspaceId, `app:${entry.app.id}`); } catch { /* nothing kept */ }
+    }
     if (entry.aoSession && ![...sessions.values()].some((other) => other.aoSession === entry.aoSession)) {
       paneEntries.set(entry.aoSession, entry);
       prunePaneEntries();
@@ -1644,9 +1662,12 @@ function createChatAgentTools({
     }
   }
 
-  function mint({ agent, workspaceId, approvalMode, autoReview = false, subagent = false, previewOnly = false, expiresAt = null, nativeScope = null, unifiedFiles = false }) {
+  function mint({ agent, workspaceId, approvalMode, autoReview = false, subagent = false, previewOnly = false, expiresAt = null, nativeScope = null, unifiedFiles = false, app = null, appRoot = null }) {
     while (sessions.size >= MAX_SESSIONS) {
-      const oldest = [...sessions.values()].sort((left, right) => left.usedAt - right.usedAt)[0];
+      // A connected app is never pushed out by chats: it would lose its key and ask to pair again.
+      const all = [...sessions.values()];
+      const chats = all.filter((other) => !other.app);
+      const oldest = (chats.length ? chats : all).sort((left, right) => left.usedAt - right.usedAt)[0];
       forget(oldest.key);
     }
     const key = crypto.randomBytes(18).toString("base64url");
@@ -1654,8 +1675,11 @@ function createChatAgentTools({
     const entry = {
       // Only the credential's hash is held (and kept on disk), never the credential itself.
       // A subagent's own session never starts subagents (one level only).
-      key, agent, workspaceId, groups: currentGroups().filter((group) => previewOnly ? group === "preview" : !subagent || group !== "subagents"), expected: hashBearer(`Bearer ${token}`),
+      key, agent, workspaceId, groups: currentGroups().filter((group) => app ? APP_GROUPS.has(group)
+        : previewOnly ? group === "preview" : !subagent || group !== "subagents"), expected: hashBearer(`Bearer ${token}`),
       previewOnly, expiresAt, nativeScope,
+      // A connected app (see APP_GROUPS): who it is and the project folder it was allowed to use.
+      app, appRoot,
       subagent: subagent === true,
       // Only a session launched to bypass permissions runs commands without a confirmation each.
       // Captured once, at spawn time, from the mode the session was launched with: changing the
@@ -1712,6 +1736,7 @@ function createChatAgentTools({
         groups: entry.groups, bypass: entry.bypass, autoReview: entry.autoReview, subagent: entry.subagent === true,
         unifiedFiles: entry.unifiedFiles === true, createdAt: entry.createdAt, usedAt: entry.usedAt,
         ...(entry.previewOnly ? { previewOnly: true, expiresAt: entry.expiresAt, nativeScope: entry.nativeScope } : {}),
+        ...(entry.app ? { app: entry.app, appRoot: entry.appRoot } : {}),
         origins: [...entry.origins].slice(0, 50),
       })),
     };
@@ -1751,15 +1776,19 @@ function createChatAgentTools({
     if (data?.version !== LEASE_FILE_VERSION || !Number.isInteger(data.port) || data.port <= 0 || data.port > 65535) return { port: 0, entries: [] };
     const entries = (Array.isArray(data.sessions) ? data.sessions : []).slice(0, MAX_SESSIONS)
       .filter((saved) => SESSION_KEY.test(String(saved?.key)) && /^[0-9a-f]{64}$/.test(String(saved?.hash))
-        && MCP_HTTP_AGENTS.has(saved.agent) && WORKSPACE_ID.test(String(saved.workspaceId))
+        && (saved.agent === "app" ? Boolean(appRecord(saved.app)) && typeof saved.appRoot === "string" && path.isAbsolute(saved.appRoot)
+          && saved.aoSession === null && saved.previewOnly !== true && Number.isFinite(saved.usedAt) && now() - saved.usedAt < APP_MAX_IDLE_MS
+          : MCP_HTTP_AGENTS.has(saved.agent)) && WORKSPACE_ID.test(String(saved.workspaceId))
         && (saved.aoSession === null || SESSION_ID.test(String(saved.aoSession)))
         && (saved.previewOnly !== true || saved.agent === "codex" && nativePreviewScope(saved.nativeScope)
           && Number.isFinite(saved.expiresAt) && saved.expiresAt > now() && saved.expiresAt <= now() + 900_000
           && (saved.aoSession === null || String(saved.aoSession).startsWith(`native:${encodeURIComponent(saved.workspaceId)}:`)))
-        && Number.isFinite(saved.usedAt) && now() - saved.usedAt < LEASE_MAX_IDLE_MS)
+        && Number.isFinite(saved.usedAt) && now() - saved.usedAt < (saved.agent === "app" ? APP_MAX_IDLE_MS : LEASE_MAX_IDLE_MS))
       .map((saved) => ({
         key: saved.key, agent: saved.agent, workspaceId: saved.workspaceId, expected: Buffer.from(saved.hash, "hex"),
-        groups: (Array.isArray(saved.groups) ? saved.groups : []).filter((group) => GROUPS.includes(group) && (saved.previewOnly !== true || group === "preview")),
+        groups: (Array.isArray(saved.groups) ? saved.groups : []).filter((group) => GROUPS.includes(group)
+          && (saved.agent === "app" ? APP_GROUPS.has(group) : saved.previewOnly !== true || group === "preview")),
+        app: saved.agent === "app" ? appRecord(saved.app) : null, appRoot: saved.agent === "app" ? path.resolve(saved.appRoot) : null,
         bypass: saved.bypass === true, autoReview: saved.autoReview === true, subagent: saved.subagent === true,
         unifiedFiles: saved.unifiedFiles === true,
         previewOnly: saved.previewOnly === true, expiresAt: saved.previewOnly === true ? saved.expiresAt : null,
@@ -1796,6 +1825,20 @@ function createChatAgentTools({
 
   /** The session's worktree, as AO reports it; throws a message for the agent when it is not usable. */
   async function rootOf(entry) {
+    // A connected app works in the project folder the person chose when allowing it, never elsewhere.
+    if (entry.app) {
+      if (entry.root && now() - entry.checkedAt < ROOT_RECHECK_MS) return entry.root;
+      let real;
+      try {
+        if (!(await fs.promises.stat(entry.appRoot)).isDirectory()) throw new Error("not a directory");
+        real = await fs.promises.realpath(entry.appRoot);
+      } catch {
+        throw new ScopeError(`The project folder ${entry.app.name} was allowed to use is not available.`);
+      }
+      entry.root = { path: entry.appRoot, real, projectFolder: true };
+      entry.checkedAt = now();
+      return entry.root;
+    }
     if (!entry.aoSession) throw new ScopeError("This chat's session workspace is not ready yet; try again in a moment.");
     if (entry.root && now() - entry.checkedAt < ROOT_RECHECK_MS) return entry.root;
     if (typeof sessionWorkspace !== "function") throw new ScopeError("This chat's session workspace is unavailable.");
@@ -1854,7 +1897,7 @@ function createChatAgentTools({
     if (entry.previewOnly) return allowed(entry, "preview") ? [...PREVIEW_TOOL_DEFS] : [];
     const catalog = await requestHeadless(`/api/v1/tools/catalog?workspace_id=${encodeURIComponent(entry.workspaceId)}`, null, { method: "GET" });
     // The preview's tools are the app's own, not headless's.
-    const own = [...COMMAND_LIST_DEFS, ...(canWatch(entry) ? WATCH_TOOL_DEFS : []), ...(canMonitor(entry) ? MONITOR_TOOL_DEFS : []),
+    const own = entry.app ? [...COMMAND_LIST_DEFS, ...(computerControl ? GUIDE_TOOL_DEFS : [])] : [...COMMAND_LIST_DEFS, ...(canWatch(entry) ? WATCH_TOOL_DEFS : []), ...(canMonitor(entry) ? MONITOR_TOOL_DEFS : []),
       ...ATTENTION_TOOL_DEFS.filter(tool => tool.name !== "push_notification" || canNotify(entry)),
       ...(allowed(entry, "preview") ? PREVIEW_TOOL_DEFS : []), ...(allowed(entry, "subagents") ? SUBAGENT_TOOL_DEFS : []), ...SHOW_TOOL_DEFS,
       ...(canPlan(entry) ? [OPEN_PLAN_DEF] : []), ...(canWake(entry) ? WAKE_TOOL_DEFS : []), ...(canGoal(entry) ? GOAL_TOOL_DEFS : []),
@@ -2001,7 +2044,9 @@ function createChatAgentTools({
     return { result: operation.result };
   }
 
-  const who = (entry) => [`Agent: ${entry.agent}\nAO session: `, { value: String(entry.aoSession), own: true }, "\n"];
+  const who = (entry) => entry.app
+    ? [`Connected app: ${entry.app.name}\nProgram: `, { value: entry.app.program, own: true }, "\n"]
+    : [`Agent: ${entry.agent}\nAO session: `, { value: String(entry.aoSession), own: true }, "\n"];
 
   /**
    * Codex's auto-review of a call that sees or drives the screen, whatever the chat's approval mode:
@@ -2040,8 +2085,15 @@ function createChatAgentTools({
       .catch(() => known?.model ?? null);
     return Promise.race([lookup, new Promise((resolve) => { setTimeout(() => resolve(known?.model ?? null), 400).unref?.(); })]);
   }
-  const agentName = (entry) => AGENT_NAMES[entry.agent] ?? (String(entry.agent || "The agent").charAt(0).toUpperCase() + String(entry.agent || "the agent").slice(1));
+  const agentName = (entry) => entry.app ? entry.app.name
+    : AGENT_NAMES[entry.agent] ?? (String(entry.agent || "The agent").charAt(0).toUpperCase() + String(entry.agent || "the agent").slice(1));
   const plainResult = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value, isError: false });
+  // Whose computer use answers these are: a chat's AO session, or a connected app's own (`app:<id>`).
+  // A connected app has no chat to show the card in, so Coding Tools' own window asks it instead.
+  const approvalSession = (entry) => entry.app ? `app:${entry.app.id}` : entry.aoSession;
+  const askedWhere = (entry) => entry.app ? "in Coding Tools" : "in the chat";
+  const askAppFor = (entry, target, signal) => computerControl.askApp({ workspaceId: entry.workspaceId, aoSession: entry.aoSession, agent: agentName(entry), target, signal,
+    ...(entry.app ? { viaDialog: true, conversation: approvalSession(entry) } : {}) });
 
   /**
    * Why a computer_* call may run without the reviewer, or null when it is reviewed. With "Review
@@ -2106,10 +2158,10 @@ function createChatAgentTools({
       let target = null;
       try { target = (await computerControl.targets()).find((item) => item.window_id === Number(args.window_id) && item.pid === Number(args.pid)) ?? null; } catch { target = null; }
       if (!target) return failedCall("That window is not open any more, or it is this app's own; call computer_list_windows again.");
-      if (!computerControl.appAllowed(target.app, entry.workspaceId, entry.aoSession)) {
-        progress?.(`Waiting for the person to allow ${agentName(entry)} to use ${target.appName} in the chat.`);
+      if (!computerControl.appAllowed(target.app, entry.workspaceId, approvalSession(entry))) {
+        progress?.(`Waiting for the person to allow ${agentName(entry)} to use ${target.appName} ${askedWhere(entry)}.`);
       }
-      const answer = await computerControl.askApp({ workspaceId: entry.workspaceId, aoSession: entry.aoSession, agent: agentName(entry), target, signal });
+      const answer = await askAppFor(entry, target, signal);
       if (!answer?.allowed) return refusedApp(target.appName, answer);
       // An agent that hung up while the person answered never hears of the control: none starts.
       if (signal?.aborted) return failedCall("This chat's tool call was cancelled.");
@@ -2144,10 +2196,9 @@ function createChatAgentTools({
       return failedCall("Computer use is off. Call computer_list_windows, then computer_select_window with the window_id and pid "
         + "of the window you need; the user is asked to allow its app.");
     }
-    if (!computerControl.appAllowed(controlled.app, entry.workspaceId, entry.aoSession)) {
-      progress?.(`Waiting for the person to allow ${agentName(entry)} to use ${computerControl.appName(controlled.app, controlled.title)} in the chat.`);
-      const answer = await computerControl.askApp({ workspaceId: entry.workspaceId, aoSession: entry.aoSession, agent: agentName(entry),
-        target: { ...controlled, appName: computerControl.appName(controlled.app, controlled.title) }, signal });
+    if (!computerControl.appAllowed(controlled.app, entry.workspaceId, approvalSession(entry))) {
+      progress?.(`Waiting for the person to allow ${agentName(entry)} to use ${computerControl.appName(controlled.app, controlled.title)} ${askedWhere(entry)}.`);
+      const answer = await askAppFor(entry, { ...controlled, appName: computerControl.appName(controlled.app, controlled.title) }, signal);
       if (!answer?.allowed) return refusedApp(computerControl.appName(controlled.app, controlled.title), answer);
     }
     return null;
@@ -2630,6 +2681,8 @@ function createChatAgentTools({
     if (!isEnabled()) return failedCall("The app's tools for chat agents are turned off under Plugins > Chat add-ons.");
     const group = groupOf(name);
     if (!group || !allowed(entry, group)) return failedCall(`Unknown tool: ${name}`);
+    // A connected app never reaches a chat's own tools (its pane, plan, goals, wake-ups, name).
+    if (entry.app && LOCAL_TOOL_NAMES.has(name) && !APP_LOCAL_TOOLS.has(name)) return failedCall(`Unknown tool: ${name}`);
     const signal = entry.lifetime.signal;
     const stopped = unavailable(entry, name, signal);
     if (stopped) return stopped;
@@ -3095,6 +3148,44 @@ function createChatAgentTools({
     }
   }
 
+  // Connect an app: POST /apps/pair { app: { id, name } }. One request at a time; it is answered only
+  // after the person chose in Coding Tools' window (pairApp names the program that asked and lets them
+  // pick the project). The app gets its own address and credential; only the credential's hash is kept,
+  // and a new pairing replaces the app's earlier credential.
+  let pairing = false;
+  async function pairRequest(request, response) {
+    if (request.method !== "POST" || typeof pairApp !== "function") { send(response, 404, { error: "Not found" }); return; }
+    if (pairing) { send(response, 409, { error: "Another app is waiting for an answer in Coding Tools." }); return; }
+    pairing = true;
+    try {
+      let raw = "";
+      for await (const chunk of request) {
+        raw += chunk;
+        if (raw.length > 2048) { send(response, 413, { error: "Request too large." }); return; }
+      }
+      let body = null;
+      try { body = JSON.parse(raw); } catch { body = null; }
+      const id = body?.app?.id, name = typeof body?.app?.name === "string" ? body.app.name.trim().replace(/[\r\n]/g, " ") : "";
+      if (!APP_ID.test(String(id)) || !name || name.length > 60) { send(response, 400, { error: "Name the app: { app: { id, name } }." }); return; }
+      const decision = await pairApp({ id, name, peerPort: request.socket.remotePort, serverPort: port });
+      const app = decision ? appRecord({ id, name, program: decision.program }) : null;
+      if (!app || !WORKSPACE_ID.test(String(decision.workspaceId)) || typeof decision.root !== "string" || !path.isAbsolute(decision.root)) {
+        send(response, 403, { error: "Not allowed in Coding Tools." });
+        return;
+      }
+      for (const entry of [...sessions.values()]) if (entry.app?.id === app.id) forget(entry.key, { ended: true });
+      const { entry, token } = mint({ agent: "app", workspaceId: decision.workspaceId, app, appRoot: path.resolve(decision.root) });
+      logger.info?.("chat_agent_tools.app_connected", { app: app.id, groups: entry.groups });
+      send(response, 200, { url: `http://127.0.0.1:${port}/mcp/${encodeURIComponent(entry.workspaceId)}/${entry.key}`, token,
+        project: typeof decision.project === "string" ? decision.project.slice(0, 200) : "" });
+    } catch (error) {
+      logger.warn?.("chat_agent_tools.app_pairing_failed", { message: errorMessage(error) });
+      if (!response.headersSent) send(response, 500, { error: "Pairing failed." });
+    } finally {
+      pairing = false;
+    }
+  }
+
   function send(response, status, body, headers = {}) {
     const payload = body === undefined ? "" : JSON.stringify(body);
     // Every answer closes its connection. Node drops an idle keep-alive connection after 5 s; an
@@ -3172,6 +3263,7 @@ function createChatAgentTools({
       send(response, 403, rpcError(null, -32000, "Forbidden"));
       return;
     }
+    if (String(request.url || "").split("?")[0] === "/apps/pair") { void pairRequest(request, response); return; }
     if (!workspaceId || !WORKSPACE_ID.test(workspaceId) || !SESSION_KEY.test(key)) {
       send(response, 404, rpcError(null, -32000, "Unknown session path"));
       return;
@@ -3227,6 +3319,11 @@ function createChatAgentTools({
     for (const entry of [...sessions.values()]) {
       if (entry.previewOnly) {
         if (now() >= entry.expiresAt) forget(entry.key, { ended: true });
+        continue;
+      }
+      // A connected app has no AO session; it lasts until removed, or a month unused.
+      if (entry.app) {
+        if (now() - entry.usedAt >= APP_MAX_IDLE_MS) forget(entry.key, { ended: true });
         continue;
       }
       if (!entry.aoSession) {
@@ -3437,6 +3534,19 @@ function createChatAgentTools({
      * whose AO session is `session` needs no review, or null. `tool` is the app tool's own name.
      */
     computerStepAllowed,
+    /** The apps connected through Connect an app, for Settings (never a credential). */
+    connectedApps() {
+      return [...sessions.values()].filter((entry) => entry.app).map((entry) => ({
+        id: entry.app.id, name: entry.app.name, program: entry.app.program, workspaceId: entry.workspaceId,
+        folder: entry.appRoot, groups: [...entry.groups], createdAt: entry.createdAt, usedAt: entry.usedAt,
+      }));
+    },
+    /** Disconnects an app: its credential stops working at once. */
+    forgetApp(id) {
+      let removed = false;
+      for (const entry of [...sessions.values()]) if (entry.app?.id === id) { forget(entry.key, { ended: true }); removed = true; }
+      return removed;
+    },
     /**
      * Tools for one AO chat session about to be spawned, or null when the setting is off, the
      * agent's driver cannot take an HTTP server, or the workspace id is unusable. `servers` go into
