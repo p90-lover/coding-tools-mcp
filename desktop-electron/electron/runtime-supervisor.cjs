@@ -4,6 +4,25 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
+
+/** Windows refusing a write, rename or removal: an antivirus or another process holding the file. */
+const stateFileRefused = (error) => ["EPERM", "EACCES", "EBUSY"].includes(error?.code);
+
+/** Throws when a parsed ownership marker does not have the marker's shape. */
+function validStateShape(state) {
+  const validPid = (value) => value === null || (Number.isInteger(value) && value > 0);
+  if (!state
+    || state.version !== 1
+    || !Number.isInteger(state.ownerPid)
+    || state.ownerPid < 1
+    || !validPid(state.daemonPid)
+    || !validPid(state.tunnelPid)
+    || typeof state.status !== "string"
+    || typeof state.updatedAt !== "string"
+    || Number.isNaN(Date.parse(state.updatedAt))) {
+    throw new Error("state shape is invalid");
+  }
+}
 const { redactText } = require("./logging.cjs");
 const {
   DETACH_OWNED_CHILD,
@@ -526,7 +545,13 @@ class RuntimeSupervisor {
     // Starts the bridge daemon (spawnChild); a worker by default, so Windows creating the process
     // does not hold this thread.
     spawnProcess = spawnOffThread,
+    // How the ownership marker is written and removed (tests stand in a refusing disk).
+    stateFiles = null,
   }) {
+    this.stateFiles = stateFiles ?? {
+      write: (file, text) => writePrivateFileAtomic(file, text),
+      remove: (file) => fs.rmSync(file, { force: true }),
+    };
     this.onTunnelReady = onTunnelReady;
     this.spawnProcess = spawnProcess;
     // A child start still in flight, by name: a stop waits for it, so a child started in that gap is
@@ -558,6 +583,13 @@ class RuntimeSupervisor {
     this.configPath = path.join(coreHome, "config.json");
     this.configCache = null; // { size, mtimeMs, value }: see readConfigJson
     this.statePath = path.join(coreHome, "runtime", "launcher-supervisor.json");
+    // When Windows refuses the marker (an antivirus kept one it had restored from quarantine refused
+    // for hours, 2026-11-27/28), ownership is written beside it and reads take the newer of the two.
+    // A refused marker failed every runtime start, retried every 2 minutes with the main thread held
+    // 1.4 s each time, and hung quitting (its removal threw inside the forced shutdown).
+    this.redirectPath = path.join(coreHome, "runtime", "launcher-supervisor.redirect.json");
+    this.stateRedirected = false;
+    this.redirectMayExist = true; // the first read finds out, once per run
     this.daemon = null;
     this.tunnel = null;
     this.stopping = false;
@@ -758,6 +790,30 @@ class RuntimeSupervisor {
   }
 
   readState() {
+    const redirected = this.redirectedState();
+    const primary = this.readMarkerState();
+    if (!redirected) return primary;
+    if (primary && Date.parse(primary.updatedAt) > Date.parse(redirected.updatedAt)) return primary;
+    return redirected.cleared ? null : this.acceptState(redirected);
+  }
+
+  /**
+   * The redirect file's state (written while Windows refused the marker), or null: missing, or not a
+   * state or a cleared record. Only read when one may exist, so the usual read costs no disk call.
+   */
+  redirectedState() {
+    if (!this.redirectMayExist) return null;
+    let state;
+    try { state = JSON.parse(fs.readFileSync(this.redirectPath, "utf8")); } catch (error) {
+      if (error?.code === "ENOENT") this.redirectMayExist = false;
+      return null;
+    }
+    if (state?.version !== 1 || typeof state.updatedAt !== "string" || Number.isNaN(Date.parse(state.updatedAt))) return null;
+    if (state.cleared === true) return state;
+    try { validStateShape(state); return state; } catch { return null; }
+  }
+
+  readMarkerState() {
     if (!fs.existsSync(this.statePath)) {
       this.writtenStateKey = null;
       this.writtenState = null;
@@ -790,18 +846,7 @@ class RuntimeSupervisor {
 
   /** A parsed ownership marker, checked; throws when its shape is invalid. */
   acceptState(state) {
-    const validPid = (value) => value === null || (Number.isInteger(value) && value > 0);
-    if (!state
-      || state.version !== 1
-      || !Number.isInteger(state.ownerPid)
-      || state.ownerPid < 1
-      || !validPid(state.daemonPid)
-      || !validPid(state.tunnelPid)
-      || typeof state.status !== "string"
-      || typeof state.updatedAt !== "string"
-      || Number.isNaN(Date.parse(state.updatedAt))) {
-      throw new Error("state shape is invalid");
-    }
+    validStateShape(state);
     if (this.writtenStateKey && stateKey(state) !== this.writtenStateKey) {
       this.writtenStateKey = null;
       this.writtenState = null;
@@ -816,6 +861,7 @@ class RuntimeSupervisor {
    * the power cut or crash that leaves one.
    */
   async readStateAsync() {
+    if (this.redirectMayExist) return this.readState();
     let bytes;
     try {
       bytes = await fs.promises.readFile(this.statePath);
@@ -889,7 +935,7 @@ class RuntimeSupervisor {
     // ends every process the marker names; whatever it then holds is discarded at the next start
     // (from before this boot), and a torn one is set aside (readState). It stays synchronous so a
     // read right after a write, here or by the next launcher, sees it.
-    writePrivateFileAtomic(this.statePath, `${JSON.stringify(state, null, 2)}\n`);
+    this.persistState(`${JSON.stringify(state, null, 2)}\n`);
     this.writtenStateKey = key;
     this.writtenState = state;
     return state;
@@ -914,8 +960,43 @@ class RuntimeSupervisor {
     }
   }
 
+  /**
+   * Writes the marker; once Windows refuses it, the redirect file beside it for the rest of this run
+   * (the refused try costs the atomic write's 1.4 s of rename retries once, not on every write). The
+   * first marker write that works again (after a restart) removes the redirect file.
+   */
+  persistState(text) {
+    if (!this.stateRedirected) {
+      try {
+        this.stateFiles.write(this.statePath, text);
+        if (this.redirectMayExist) { this.stateFiles.remove(this.redirectPath); this.redirectMayExist = false; }
+        return;
+      } catch (error) {
+        if (!stateFileRefused(error)) throw error;
+        this.stateRedirected = true;
+        this.logger?.warn?.("runtime.state_redirected", { path: this.redirectPath, message: errorMessage(error) });
+      }
+    }
+    this.stateFiles.write(this.redirectPath, text);
+    this.redirectMayExist = true;
+  }
+
   clearState() {
-    fs.rmSync(this.statePath, { force: true });
+    try {
+      if (!this.stateRedirected) this.stateFiles.remove(this.statePath);
+    } catch (error) {
+      if (!stateFileRefused(error)) throw error;
+      this.stateRedirected = true;
+      this.logger?.warn?.("runtime.state_redirected", { path: this.redirectPath, message: errorMessage(error) });
+    }
+    if (this.stateRedirected) {
+      // The refused marker stays on disk; a newer cleared record beside it outranks it in readState.
+      this.stateFiles.write(this.redirectPath, `${JSON.stringify({ version: 1, cleared: true, updatedAt: new Date().toISOString() })}\n`);
+      this.redirectMayExist = true;
+    } else if (this.redirectMayExist) {
+      this.stateFiles.remove(this.redirectPath);
+      this.redirectMayExist = false;
+    }
     this.writtenStateKey = null;
     this.writtenState = null;
   }
