@@ -823,6 +823,59 @@ test("split view: Split view adds a pane, New chat opens in the focused pane, th
   assert.deepEqual(panes(), [], "closing the last pane leaves one chat");
 });
 
+// 2026-11-27: Bitdefender quarantined two files of Local Storage\leveldb, Chromium started an empty
+// store, and the split view was gone with every other window setting. Its userData copy
+// (ui-settings-mirror) now brings it back before the Surface reads the store.
+test("split view: a store emptied by a reset gets its panes, widths and row split back from the userData copy", async (t) => {
+  const { connectMain, fakeClock, fakeWindow, loadPageMirror, main, mirrorDir, storageType } = require("./support/ui-settings-mirror-harness.cjs");
+  const dir = mirrorDir(t);
+  const page = loadPageMirror();
+  const Storage = storageType();
+  const clock = fakeClock();
+  const mainRun = () => {
+    const mirror = main.createUiSettingsMirror({ filePath: path.join(dir, main.MIRROR_FILE) });
+    return { mirror, ...connectMain(mirror) };
+  };
+  const runEffects = (fixture, marker) => fixture.effects.filter(effect => String(effect).includes(marker)).forEach(effect => effect());
+  const restoreSplit = (storage) => {
+    const fixture = surfaceComposer({ chatTaskId: "t1" }, { localStorage: storage });
+    fixture.render();
+    runEffects(fixture, "splitRestored.current = true");
+    return fixture;
+  };
+
+  // A run with the split view in use: the Surface keeps it in the store, the mirror copies it out.
+  const before = mainRun();
+  const used = new Storage({ "coding-tools:ao:workspace": "w" });
+  page.installUiSettingsMirror({ storage: used, bridge: before.bridge, target: fakeWindow(), ...clock });
+  const first = restoreSplit(used);
+  first.walk(first.render()).find(item => item.props?.actions?.openSplit).props.actions.openSplit("w", "t2");
+  first.state.splitWeightsSaved = [0.62, 0.38];
+  first.state.splitRow = 0.4;
+  first.render();
+  runEffects(first, "localStorage.setItem(splitStore");
+  assert.deepEqual(JSON.parse(used.getItem("coding-tools:ao:split-view")),
+    { panes: [{ workspaceId: "w", taskId: "t2", col: 1, row: 0 }], weights: [0.62, 0.38], rowSplit: 0.4 }, "the Surface saved its split view");
+  clock.advance(1500);
+  await before.mirror.saved();
+  assert.equal(before.calls.saves.length, 1);
+
+  // Chromium finds the store damaged and starts an empty one: the next run restores it first.
+  const after = mainRun();
+  const reset = new Storage();
+  const result = page.installUiSettingsMirror({ storage: reset, bridge: after.bridge, target: fakeWindow(), ...clock });
+  assert.equal(after.calls.loads, 1);
+  assert.equal(result.restored, 2, "the split view and the project");
+  const second = restoreSplit(reset);
+  assert.deepEqual(plain(second.state.splitPanes.map(item => [item.workspaceId, item.taskId, item.col, item.row])), [["w", "t2", 1, 0]],
+    "the chat beside the window's own is back in its column");
+  assert.deepEqual(plain(second.state.splitWeightsSaved), [0.62, 0.38], "with its column widths");
+  assert.equal(second.state.splitRow, 0.4, "and its row split");
+
+  const lost = restoreSplit(new Storage());
+  assert.deepEqual(plain(lost.state.splitPanes), [], "without the copy the same reset leaves one chat alone, as on 2026-11-27");
+});
+
 // Ten screens: the window's chat at 0,0 and nine panes over five columns of two.
 const tenScreens = () => [[0, 1], ...[1, 2, 3, 4].flatMap(col => [[col, 0], [col, 1]])]
   .map(([col, row], index) => ({ id: `p${index}`, workspaceId: "w", taskId: `t${index + 1}`, col, row }));

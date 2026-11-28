@@ -1190,6 +1190,11 @@ export type ProjectGit = {
   branch: string | null;
 };
 
+/** main's answer to loadUiSettingsMirror: `ok: false` when the copy could not be read (left as it is). */
+export type UiSettingsMirrorLoad =
+  | { ok: true; entries: Record<string, string> | null; damaged?: boolean }
+  | { ok: false; reason: string };
+
 export interface LauncherApi {
   snapshot(): Promise<LauncherSnapshot>;
   registerStatus(): Promise<RegisterStatus>;
@@ -1356,6 +1361,9 @@ export interface LauncherApi {
   editAppLayout?(input: AppLayoutEditInput): Promise<AppLayoutSnapshot>;
   resetAppLayout?(): Promise<AppLayoutSnapshot>;
   onAppLayoutChanged?(listener: (layout: AppLayoutSnapshot) => void): () => void;
+  /** The userData copy of the window's own localStorage settings (src/ui-settings-mirror.ts). Synchronous. */
+  loadUiSettingsMirror?(): UiSettingsMirrorLoad;
+  saveUiSettingsMirror?(entries: Record<string, string>): void;
   setSidebarState(state: { open: boolean; width: number; moreToolsPinned?: boolean } | { moreToolsPinned: boolean }): Promise<LauncherState>;
   externalServicesSnapshot(): Promise<ExternalServicesSnapshot>;
   managedComponentsSnapshot(): Promise<ManagedComponentsSnapshot>;
