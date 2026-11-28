@@ -5326,6 +5326,16 @@ async function start() {
         rewriteCommand: (command) => rtk.rewrite(command),
         // ...and never answers for the user what the command approver's safety rules block.
         blockedCommand: (text) => missionWorkflowRuntime?.blockedRequest?.(text) ?? true,
+        // ssh_exec: one command on a host approved under Connections > SSH hosts. The store and the
+        // workflow are the current backend start's (both are made again on a restart, further down);
+        // with no workflow the SSH rules cannot judge a call, so it waits for the person.
+        sshExec: {
+          hosts: () => sshConnectionsService?.approvedHosts?.() ?? [],
+          screen: (input) => missionWorkflowRuntime?.screenSshExec?.(input) ?? null,
+          run: (input) => (sshConnectionsService
+            ? sshConnectionsService.exec(input)
+            : { ok: false, code: "restarting", error: "SSH hosts are starting. Try again in a moment; nothing ran." }),
+        },
         // The subagents a chat agent may start (Runtime > Subagents).
         subagents: subagentsService,
         // app_processes: the app's own processes and what they started, with CPU, memory and uptime.

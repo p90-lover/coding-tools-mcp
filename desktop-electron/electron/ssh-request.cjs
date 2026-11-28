@@ -31,8 +31,10 @@
 // \" and splits words at U+0085. So the line is also read as each of those shells reads it,
 // written back in the reader's own dialect, and the strictest verdict stands.
 const path = require("node:path");
+// What ssh_exec takes as a remote command: one rule, kept with the command line it ends up in.
+const { execCommandProblem } = require("./ssh-connections.cjs");
 
-const RANK = { allow: 0, review: 1, person: 2, blocked: 3 };
+const RANK ={ allow: 0, review: 1, person: 2, blocked: 3 };
 const names = (list) => new Set(list.split(" ").filter(Boolean));
 const FAMILY = names("ssh scp sftp rsync ssh-keygen ssh-keyscan ssh-add");
 // Other SSH clients and helpers: their options are not read here, so only the person may approve
@@ -912,10 +914,15 @@ function settle(context, { kind, state, target, port, remote = "", interactive =
   if (tty) return person("interactive", "It asks the host for a terminal (-t), which stays open for typing, so only you can approve it.", approved);
   // What the reviewer cannot see in the command line itself.
   const told = [...notes];
-  if (user === null && kind !== "ssh-keyscan") told.push(`No user name is on the command line, so ssh uses its own default; the approved user is ${found.record.user}.`);
-  if (remote && resolvedQuotes(remote) !== remote) told.push(`With its escaped quotes resolved, the remote command reads: ${resolvedQuotes(remote)}`);
-  if (/\$[A-Za-z_{]|%[A-Za-z_]\w*%/.test(remote)) {
-    told.push("The remote command holds a variable. If this machine's shell fills it in before ssh runs, the app has not seen its value: allow it only if the command is safe whatever the variable holds.");
+  // ssh_exec's command reaches ssh as one argv element, read by no shell on this machine: what the
+  // reviewer is shown is what the host's shell gets, so the notes on a local shell do not apply.
+  if (kind === "ssh-exec") told.push(EXEC_NOTE);
+  else {
+    if (user === null && kind !== "ssh-keyscan") told.push(`No user name is on the command line, so ssh uses its own default; the approved user is ${found.record.user}.`);
+    if (remote && resolvedQuotes(remote) !== remote) told.push(`With its escaped quotes resolved, the remote command reads: ${resolvedQuotes(remote)}`);
+    if (/\$[A-Za-z_{]|%[A-Za-z_]\w*%/.test(remote)) {
+      told.push("The remote command holds a variable. If this machine's shell fills it in before ssh runs, the app has not seen its value: allow it only if the command is safe whatever the variable holds.");
+    }
   }
   return finding("review", "approved-host", `It goes to "${found.record.label}", a host in your SSH hosts list, so the reviewer checks it.`, { ...base, ...approved, notes: told });
 }
@@ -1639,6 +1646,43 @@ function fedScripts(command, QUOTED) {
   return scripts.filter((script) => script.trim());
 }
 
+// --- the app's own ssh_exec tool -----------------------------------------------------------------
+// Milestone 3 (2026-11-28): agents run a command on an approved host through the app's ssh_exec
+// tool (chat-agent-tools.cjs), which names the host by its id in the SSH hosts list and gives the
+// remote command. The app builds ssh's command line itself (ssh-connections.cjs execArgv), so no
+// option, key, config or destination of the agent's reaches ssh: only the host and the command are
+// judged, by the same rules as `ssh -l <user> -p <port> -- <host> <command>`.
+const EXEC_HOST_ID = /^[0-9a-f]{12}$/;
+const EXEC_NOTE = "It runs through the app's ssh_exec tool: the app builds the ssh command line itself (the host key the user "
+  + "confirmed, key sign-in only, no prompt, terminal, input or forwarding), and the remote command reaches the host's shell "
+  + "exactly as shown, in one connection that ends with it.";
+/**
+ * The verdict for one ssh_exec call, as sshRequest's ({ status, why, ... }, kind "ssh-exec"). An id
+ * that names no approved host, and a command ssh_exec does not take (not one line of visible text,
+ * or too long), are blocked: the tool would refuse to run them, so nobody is asked about them.
+ */
+function sshExecRequest(hostId, command, { approvedHosts = [], shell } = {}) {
+  if (typeof shell?.commandLines !== "function" || typeof shell?.shellSegments !== "function" || !(shell.QUOTED instanceof RegExp)) {
+    throw new TypeError("sshExecRequest needs the command approver's shell reader");
+  }
+  const remote = typeof command === "string" ? command : "";
+  const base = { kind: "ssh-exec", remote };
+  try {
+    const hosts = approvedList(approvedHosts);
+    const record = typeof hostId === "string" && EXEC_HOST_ID.test(hostId) ? hosts.find((entry) => entry.id === hostId) : null;
+    if (!record) {
+      return finding("blocked", "exec-host", "ssh_exec runs only on a host in your SSH hosts list whose key you confirmed, and this host id is not one of them.",
+        { ...base, match: clip(hostId, 40) });
+    }
+    const problem = execCommandProblem(command);
+    if (problem) return finding("blocked", "exec-command", `ssh_exec does not take this command: ${problem}`, { ...base, match: clip(remote, 40) });
+    const context = { hosts, folder: null, cwd: null, shell, client: true };
+    return settle(context, { kind: "ssh-exec", state: optionState(), target: { host: record.host, user: record.user }, port: record.port, remote });
+  } catch {
+    return finding("person", "unreadable", "The app could not read this ssh_exec call, so only you can approve it.", base);
+  }
+}
+
 // A command longer than this is read only the reader's way (see sshRequest).
 const LONG_COMMAND = 64 * 1024;
 /** `ssh -V` or `ssh-add -l` as the whole request, as typed (optionally after `& `, with 2>&1): the two local checks. */
@@ -1766,4 +1810,4 @@ function sshRequest(command, { approvedHosts = [], folder = null, cwd = null, sh
   }
 }
 
-module.exports = { sshRequest, sshTrustFile, mentionsSsh, SSH_TRUST_WHY, SSH_RANK: RANK };
+module.exports = { sshRequest, sshExecRequest, sshTrustFile, mentionsSsh, SSH_TRUST_WHY, SSH_RANK: RANK };

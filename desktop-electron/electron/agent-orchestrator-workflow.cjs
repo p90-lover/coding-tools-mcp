@@ -26,7 +26,7 @@ const { ACCOUNT_KINDS_PATH, withAccountKinds } = require("./cpa-account-kinds.cj
 const { guardianInstructions } = require("./codex-guardian-policy.cjs");
 const { acceptsAutobot, createAutobotPermission, reviewAutobot } = require("./chat-autobot-permission.cjs");
 const { gitPushRequest, readReviewRepository } = require("./git-remote.cjs");
-const { sshRequest: readSshRequest, sshTrustFile, mentionsSsh, SSH_TRUST_WHY, SSH_RANK } = require("./ssh-request.cjs");
+const { sshRequest: readSshRequest, sshExecRequest: readSshExecRequest, sshTrustFile, mentionsSsh, SSH_TRUST_WHY, SSH_RANK } = require("./ssh-request.cjs");
 const { nativeChatPreviewSessionId } = require("./chat-agent-tools.cjs");
 
 function clean(value, limit, required = true) {
@@ -4297,10 +4297,43 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!mentionsSsh(command)) return null;
     return readSshRequest(command, { approvedHosts: approvedHosts ?? approvedSshHosts(), folder, cwd, shell: SSH_SHELL });
   }
+  // The app's own ssh_exec tool (chat-agent-tools.cjs, milestone 3, 2026-11-28): one command on an
+  // approved host, named by its id, with the ssh command line built by the app (ssh-connections.cjs).
+  // Its argument is remote_command, never `command`: AO's card reads an MCP tool's `command` as a
+  // shell line for this machine (agent-orchestrator-upstream.cjs), and so would safetyParts and the
+  // publication checks here. The remote command is judged on its host, by sshExecRequest alone.
+  const SSH_EXEC_TOOL = "mcp__coding-tools__ssh_exec";
+  /**
+   * The SSH verdict for an ssh_exec request (an approval of that tool, with its arguments as JSON),
+   * or null for any other request.
+   */
+  function sshExecFor(value) {
+    if (!value || typeof value !== "object" || String(value.tool ?? "") !== SSH_EXEC_TOOL) return null;
+    const raw = typeof value.toolInput === "string" ? value.toolInput : "";
+    // Arguments cut short are read as far as they go; what is missing then decides nothing in their favour.
+    const args = argsObject(raw) ?? looseArgs(raw);
+    return readSshExecRequest(args.host_id, args.remote_command, { approvedHosts: approvedSshHosts(), shell: SSH_SHELL });
+  }
+  /**
+   * ssh_exec as the chat tools ask about it before they run it, as the agent's own request is
+   * judged (requestDenial, then sshFor). Never throws; a call it cannot judge waits for the person.
+   */
+  function screenSshExec({ hostId, command } = {}) {
+    try {
+      const args = { host_id: hostId, remote_command: command };
+      const denial = requestDenial({ kind: "tool", tool: SSH_EXEC_TOOL, toolInput: JSON.stringify(args) });
+      if (denial) return { status: "blocked", why: safetyReason(denial), rule: "safety", kind: "ssh-exec", remote: typeof command === "string" ? command : "" };
+      return sshFor({ kind: "tool", tool: SSH_EXEC_TOOL, toolInput: JSON.stringify(args) })
+        ?? { status: "person", why: "The app could not judge this ssh_exec call, so only you can approve it.", rule: "unreadable", kind: "ssh-exec" };
+    } catch {
+      return { status: "person", why: "The app could not judge this ssh_exec call, so only you can approve it.", rule: "unreadable", kind: "ssh-exec" };
+    }
+  }
   /** The strictest SSH verdict over the commands a request runs (see safetyParts), or null. */
   function sshFor(value, folder = null) {
     const cwd = value && typeof value === "object" && typeof value.cwd === "string" ? value.cwd : null;
-    let worst = null;
+    // ssh_exec's own verdict comes first, so it is the one kept on a tie (its facts name the host).
+    let worst = sshExecFor(value);
     for (const command of safetyParts(value).commands) {
       const found = sshRequest(command, { folder, cwd });
       if (found && (!worst || SSH_RANK[found.status] > SSH_RANK[worst.status])) worst = found;
@@ -4419,6 +4452,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     const secret = paths.find((file) => secretPath(file));
     if (secret) return { why: SECRET_WHY, match: secret };
+    // ssh_exec on a host id that is no approved host, with a command it does not take, or with a
+    // remote command the hard rules refuse on that host (sshExecRequest): refused here, as the
+    // agent's own ssh line would be, rather than put to anyone.
+    const exec = sshExecFor(value);
+    if (exec?.status === "blocked") return { why: exec.why.replace(/\.$/, ""), match: exec.match };
     // An edit of the files SSH trusts (known_hosts, authorized_keys, the machine's ssh config, the
     // app's own SSH hosts list): written by an agent, its own host would be an approved one.
     const trusted = changesFiles(value) ? paths.find((file) => sshTrustFile(file)) : null;
@@ -11556,7 +11594,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /** Resolves once every deleted-message, archive and unsent-draft change so far is on disk (saved off the main thread too). */
   const chatEditsSaved = () => Promise.all([chatEdits.saved(), archive.saved(), chatDrafts.saved()]);
   return Object.freeze({ call, configureChatAutobot, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals,
-    startAutonomousTurnWatch, adoptAutonomousTurns, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, sshRequest, readOnlyInspection, nativeCommandReview, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
+    startAutonomousTurnWatch, adoptAutonomousTurns, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, sshRequest, readOnlyInspection, nativeCommandReview, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, screenSshExec, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, agentApiError, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, FALLBACK_JUDGE_ALLOWS, fallbackJudgeAllows, fallbackJudgeRule, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
