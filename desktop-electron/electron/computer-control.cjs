@@ -82,13 +82,6 @@ function createAppApprovals({ file = null, now = Date.now } = {}) {
       state.approvedOnce = true;
       persist();
     },
-    /** Drops what one conversation was allowed (a connected app that disconnected); Always allow stays. */
-    forgetConversation(conversation) {
-      if (!(conversation in state.conversations)) return false;
-      delete state.conversations[conversation];
-      persist();
-      return true;
-    },
     /** Settings > Computer use > Always-allowed apps. */
     list: () => Object.entries(state.always).map(([key, entry]) => ({ app: key, name: String(entry?.name || appName(key)), at: Number(entry?.at) || 0 }))
       .sort((a, b) => a.name.localeCompare(b.name)),
@@ -316,10 +309,7 @@ function processRuns(pid) {
 }
 
 function createComputerControl({ request, BrowserWindow, screen, logger = null, ownPids = () => [process.pid], onRequests = () => undefined,
-  approvalsFile = null, now = Date.now, fileIcon = null, processAlive = processRuns,
-  // ({ agent, app, window, project, captureOff, signal }) → "always" | "conversation" | "deny": asks the
-  // person in Coding Tools' window on behalf of a connected app, which has no chat card.
-  promptApp = null }) {
+  approvalsFile = null, now = Date.now, fileIcon = null, processAlive = processRuns }) {
   const approvals = createAppApprovals({ file: approvalsFile, now });
   let bar = null;
   let heartbeat = null;
@@ -668,9 +658,8 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
    * { allowed: true } at once when it already is, else with their answer, or { allowed: false,
    * reason }. A chat asking again for the same app while its card waits shares that card.
    */
-  async function askApp({ workspaceId, aoSession = null, agent = "The agent", target, signal = null, risk = "", viaDialog = false, conversation: own = null }) {
-    // A connected app's permissions are its own (`app:<id>`), never a chat's or another app's.
-    const conversation = typeof own === "string" && /^app:[a-z][a-z0-9-]{1,31}$/.test(own) ? `${workspaceId}:${own}` : `${workspaceId}:${aoSession ?? ""}`;
+  async function askApp({ workspaceId, aoSession = null, agent = "The agent", target, signal = null, risk = "" }) {
+    const conversation = `${workspaceId}:${aoSession ?? ""}`;
     if (approvals.allowed(target.app, conversation)) {
       // Allowed before: Always allow (in another project, or from the Computer use tab) or earlier
       // in this conversation. Headless refuses every computer use call in a project whose screen
@@ -694,20 +683,6 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
     if (!workspace) return { allowed: false, reason: "the chat's project is not registered" };
     const project = workspace.name || workspace.path || workspace.id;
     const captureOff = captureOffIn(workspace);
-    // A connected app has no chat card: Coding Tools' window asks, one question at a time.
-    if (viaDialog) {
-      if (typeof promptApp !== "function") return { allowed: false, reason: "Coding Tools can't ask about this app right now" };
-      let decision;
-      try {
-        decision = await promptApp({ agent: String(agent), app: appName(target.app, target.title), window: String(target.title || ""), project: String(project), captureOff, signal });
-      } catch (error) {
-        return { allowed: false, reason: String(error?.message || error).slice(0, 200) };
-      }
-      if (decision !== "always" && decision !== "conversation") return { allowed: false, reason: "the user denied it" };
-      if (captureOff) await enableCapture(workspace);
-      approvals.allow(appKey(target.app), conversation, decision);
-      return { allowed: true, decision };
-    }
     let finish;
     const answered = new Promise((resolve) => { finish = resolve; });
     const item = {
@@ -868,7 +843,6 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
     controlled: () => controlled, appName, overview, allowApp,
     allowedApps: () => approvals.list(), forgetApp: (app) => approvals.remove(app),
     appAllowed: (app, workspaceId, aoSession) => approvals.allowed(app, `${workspaceId}:${aoSession ?? ""}`),
-    forgetConversation: (workspaceId, aoSession) => approvals.forgetConversation(`${workspaceId}:${aoSession ?? ""}`),
   });
 }
 

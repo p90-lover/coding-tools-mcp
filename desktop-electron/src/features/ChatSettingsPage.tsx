@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import type { ComputerAllowedApp, ConnectedApp, JsonObject } from "../api/contracts";
+import type { ComputerAllowedApp, JsonObject } from "../api/contracts";
 import { getCodingToolsClient } from "../api/client";
 import type { LauncherState, RendererAccessibilityMode, RendererAccessibilityStatus, UpdateSettings, UpdateSettingValues, UpdateState } from "../types";
 import { ChatGlyph } from "./ChatMenu";
@@ -147,34 +147,6 @@ function AllowedApps({ onError }: { onError: (message: string) => void }) {
   if (!apps.length) return <Row label="None yet"><span /></Row>;
   return <>{apps.map((app) => <Row key={app.app} label={app.name} description={app.app}>
     <button type="button" className="cxs-button" aria-label={`Remove ${app.name}`} onClick={() => remove(app)}>Remove</button>
-  </Row>)}</>;
-}
-
-/**
- * Connect an app: the programs paired with Coding Tools' tools (SHA, Shadow SHA), each with the project
- * folder it may use, and Disconnect, which stops its key at once; it asks again before it can reconnect.
- */
-function ConnectedApps({ onError }: { onError: (message: string) => void }) {
-  const [apps, setApps] = useState<ConnectedApp[] | null>(null);
-  const [failed, setFailed] = useState(false);
-  useEffect(() => {
-    let live = true;
-    try {
-      void getCodingToolsClient().computer.connectedApps().then((result) => { if (live) setApps(result.apps ?? []); }, () => { if (live) setFailed(true); });
-    } catch { setFailed(true); }
-    return () => { live = false; };
-  }, []);
-  const disconnect = (app: ConnectedApp) => {
-    if (!window.confirm(`Disconnect “${app.name}”?\n\nIts key stops working at once, and ${app.name} asks you again before it can use Coding Tools' tools.`)) return;
-    void getCodingToolsClient().computer.disconnectApp({ id: app.id })
-      .then((result) => { if (result.apps) setApps(result.apps); else onError(result.error || "Unable to disconnect the app"); },
-        () => onError("Unable to disconnect the app"));
-  };
-  if (failed) return <Row label="Unable to load connected apps."><span /></Row>;
-  if (!apps) return <Row label="Loading connected apps…"><span /></Row>;
-  if (!apps.length) return <Row label="None yet" description="SHA and Shadow SHA ask here before they can use Coding Tools' tools."><span /></Row>;
-  return <>{apps.map((app) => <Row key={app.id} label={app.name} description={`${app.folder} · ${app.program}`}>
-    <button type="button" className="cxs-button" aria-label={`Disconnect ${app.name}`} onClick={() => disconnect(app)}>Disconnect</button>
   </Row>)}</>;
 }
 
@@ -500,9 +472,6 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
           </div> : section === "computer-use" ? <div className="cxs-sections">
             <Group title="Always-allowed apps">
               <AllowedApps onError={setError} />
-            </Group>
-            <Group title="Connected apps">
-              <ConnectedApps onError={setError} />
             </Group>
           </div> : <div className="cxs-sections">
             <Group title="App updates">

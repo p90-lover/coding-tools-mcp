@@ -339,8 +339,6 @@ const codingToolsApi = Object.freeze({
     answer: (input) => invokeContract(ipcRenderer, "computer.answer", input),
     allowedApps: () => invokeContract(ipcRenderer, "computer.allowedApps"),
     forgetApp: (input) => invokeContract(ipcRenderer, "computer.forgetApp", input),
-    connectedApps: () => invokeContract(ipcRenderer, "computer.connectedApps"),
-    disconnectApp: (input) => invokeContract(ipcRenderer, "computer.disconnectApp", input),
     // Computer use (the sidebar tab).
     overview: () => invokeContract(ipcRenderer, "computer.overview"),
     stop: () => invokeContract(ipcRenderer, "computer.stop"),

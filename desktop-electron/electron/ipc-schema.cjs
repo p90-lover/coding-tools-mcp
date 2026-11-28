@@ -760,22 +760,6 @@ const CONTRACTS = Object.freeze({
     }),
     response: genericObject,
   }),
-  // Settings > Connected apps: programs paired through Connect an app (SHA, Shadow SHA), never a credential.
-  "computer.connectedApps": Object.freeze({
-    channel: "coding-tools:computer:connected-apps",
-    request: emptyObject,
-    response: genericObject,
-  }),
-  "computer.disconnectApp": Object.freeze({
-    channel: "coding-tools:computer:disconnect-app",
-    request: Object.freeze({
-      type: "object",
-      required: Object.freeze(["id"]),
-      properties: Object.freeze({ id: Object.freeze({ type: "string", minLength: 2, maxLength: 32 }) }),
-      additionalProperties: false,
-    }),
-    response: genericObject,
-  }),
   // Computer use (the sidebar tab).
   "computer.overview": Object.freeze({
     channel: "coding-tools:computer:overview",
