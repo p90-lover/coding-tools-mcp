@@ -288,6 +288,8 @@ export function SshConnectionsSurface({ active, setError }: {
   // page's memory only: nothing about it is saved.
   const [terminal, setTerminal] = useState<SshTerminal | null>(null);
   const [closeError, setCloseError] = useState("");
+  // The app can show that terminal at all (Coding Agent's web host cannot yet): the list says so.
+  const [canShowTerminal, setCanShowTerminal] = useState(true);
   // A terminal still open when the page itself goes away (a reload, a crash of the page) is closed
   // with it: nothing on screen could reach it again, and the SSH session would run on unseen.
   const openHandle = useRef<string | null>(null);
@@ -305,6 +307,7 @@ export function SshConnectionsSurface({ active, setError }: {
       setHosts(hostsOf(result.hosts));
       // The saved list could not be read: it shows empty and approves no host until it can be.
       setStoreNotice(typeof result.notice === "string" ? result.notice : "");
+      setCanShowTerminal(result.terminals !== false);
       setLoadError("");
     } catch (cause) {
       setLoadError(reasonOf(cause));
@@ -590,7 +593,7 @@ export function SshConnectionsSurface({ active, setError }: {
           </div>
           <span className={`app-plugin-chip ssh-host-state is-${badge.tone}`}>{badge.text}</span>
           <div className="ssh-host-actions">
-            {terminalAllowed(host, hosts ?? [])
+            {canShowTerminal && terminalAllowed(host, hosts ?? [])
               ? <button className="button-primary" disabled={working || !client} onClick={() => void openTerminal(host)} ref={opener(`terminal:${host.id}`)} type="button">
                 {busy === `open:${host.id}` ? "Opening…" : "Open terminal"}
               </button> : null}
@@ -666,6 +669,10 @@ export function SshConnectionsSurface({ active, setError }: {
       {storeNotice ? <div className="notice-row" role="alert">
         <Icon name="warning" />
         <span>{storeNotice}</span>
+      </div> : null}
+      {loaded && !canShowTerminal ? <div className="notice-row">
+        <Icon name="info" />
+        <span>This app can't show the in-app terminal yet. Approved hosts and the agent rules work as usual.</span>
       </div> : null}
 
       <div className="section-heading"><span>Hosts</span>{hosts?.length ? <small>{hosts.length}</small> : null}</div>

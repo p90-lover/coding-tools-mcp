@@ -40,7 +40,7 @@ const STOPS = "button:not(:disabled), input:not(:disabled)";
  * same results, and the same refusals for `confirm_key`. `shows` is the key the server presents.
  * As in the module, a host whose key changed stays blocked whatever a later fetch returns.
  */
-function fakeModule({ client = CLIENT, hosts = [], shows = { type: "ssh-ed25519", fingerprint: FP_NEW }, refuse = {}, notice = "" } = {}) {
+function fakeModule({ client = CLIENT, hosts = [], shows = { type: "ssh-ed25519", fingerprint: FP_NEW }, refuse = {}, notice = "", noTerminal = false } = {}) {
   const list = plain(hosts);
   const ok = (result) => ({ ok: true, moduleId: "ssh-connections", transport: "in-process", result: { ok: true, ...plain(result) } });
   const fail = (error, code) => ({ ok: false, moduleId: "ssh-connections", transport: "in-process", result: { ok: false, error, ...(code ? { code } : {}) } });
@@ -50,7 +50,7 @@ function fakeModule({ client = CLIENT, hosts = [], shows = { type: "ssh-ed25519"
   return (input) => {
     const args = input.arguments ?? {};
     if (refuse[input.operation]) return typeof refuse[input.operation] === "object" ? fail(refuse[input.operation].error, refuse[input.operation].code) : fail(refuse[input.operation]);
-    if (input.operation === "list") return ok({ client, hosts: list, ...(notice ? { notice } : {}) });
+    if (input.operation === "list") return ok({ client, hosts: list, ...(notice ? { notice } : {}), ...(noTerminal ? { terminals: false } : {}) });
     if (input.operation === "terminal_close") {
       if (!terminals.has(args.handle)) return fail("This terminal was not opened from the SSH hosts page, so it was not closed here.", "not_own");
       terminals.delete(args.handle);
@@ -1045,7 +1045,8 @@ test("the source offers no way around the comparison, one terminal in remote mod
   // its remote mode, always. No other terminal, no note about one to come.
   assert.doesNotMatch(source, /coming soon|new terminal|>\s*Terminal\s*</i);
   assert.equal((source.match(/"Open terminal"/g) || []).length, 1);
-  assert.match(source, /\{terminalAllowed\(host, hosts \?\? \[\]\)\s*\? <button className="button-primary" disabled=\{working \|\| !client\} onClick=\{\(\) => void openTerminal\(host\)\} ref=\{opener\(`terminal:\$\{host\.id\}`\)\} type="button">/);
+  // Offered only where the app can show it (the list's `terminals`; Coding Agent's web host cannot yet).
+  assert.match(source, /\{canShowTerminal && terminalAllowed\(host, hosts \?\? \[\]\)\s*\? <button className="button-primary" disabled=\{working \|\| !client\} onClick=\{\(\) => void openTerminal\(host\)\} ref=\{opener\(`terminal:\$\{host\.id\}`\)\} type="button">/);
   assert.match(source, /<AgentOrchestratorOriginalSurface hostbar=\{false\} openMissions=\{\(\) => undefined\}\s*terminal=\{\{ handle: terminal\.handle, generation: terminal\.generation, title: terminal\.title, remote: true \}\} \/>/);
   assert.equal((source.match(/<AgentOrchestratorOriginalSurface/g) || []).length, 1);
   // No colour of its own: tokens only.
@@ -1121,6 +1122,13 @@ test("Open terminal shows for approved hosts only, waits while busy, and needs t
   assert.deepEqual(groups.map((node) => ofType([node], "button").some((button) => labelOf(button) === "Open terminal")), [false, true, false]);
   const missing = await opened({ respond: fakeModule({ client: null, hosts: [PINNED] }) });
   assert.equal(missing.button("Open terminal").props.disabled, true, "no ssh client, no terminal");
+  // An app that cannot show the terminal (Coding Agent's web host, no web views yet): no button,
+  // and one line says why; the approved host and its other actions stay.
+  const viewless = await opened({ respond: fakeModule({ hosts: [PINNED], noTerminal: true }) });
+  assert.equal(viewless.buttons().includes("Open terminal"), false, viewless.buttons().join(", "));
+  assert.ok(viewless.all().includes("This app can't show the in-app terminal yet."));
+  assert.ok(viewless.buttons().includes("Remove"));
+  assert.equal(ui.all().includes("can't show the in-app terminal"), false, "an app that can says nothing");
 
   // While it opens, it and every other action wait; a second click sends nothing more.
   const module = fakeModule({ hosts: [PINNED] });

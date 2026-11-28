@@ -5592,6 +5592,9 @@ async function start() {
       // this store's own terminals get (the Antigravity CLI page's Close goes without it).
       openTerminal: (fields) => sshUpstream.harness.openSshTerminal(fields),
       closeTerminal: (handle) => sshUpstream.harness.closeTerminal(handle, { ssh: true }),
+      // That terminal shows in AO's page, a web view: a host that cannot show one yet (Coding
+      // Agent's web host) keeps the hosts list and the agent rules, and offers no terminal.
+      canShowTerminal: runningHost.capabilities?.webViews !== false,
     });
     sshConnectionsService = sshConnections;
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
