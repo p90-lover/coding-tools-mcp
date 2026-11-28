@@ -45,6 +45,9 @@ const ALLOWED = {
   // exists (system-drive.cjs): Chromium's helpers read TEMP as they start.
   "main.cjs": 25,
   "managed-components.cjs": 46, "managed-external-services.cjs": 1, "mcp-connector-setup.cjs": 1, "original-ui.cjs": 1,
+  // preload.cjs runs in the window's own process, not on Electron main: its one sendSync is the
+  // window-settings copy loaded before the first screen reads localStorage (ui-settings-mirror, 0.8.173).
+  "preload.cjs": 1,
   "process-tree.cjs": 3, "profile.cjs": 3, "provider-network.cjs": 3, "proxy-gateway-retire.cjs": 2,
   "proxybridge-nova.cjs": 5, "register-host.cjs": 9,
   // The saved accessibility mode is read once in start()'s first tick, before any window exists:
@@ -57,6 +60,9 @@ const ALLOWED = {
   // runtime-supervisor.cjs +1 (2026-11-28): reading the redirect file runs only while one exists, i.e.
   // while Windows refuses the ownership marker, plus once per run to find out it is missing.
   "runtime-supervisor.cjs": 19, "runtime.cjs": 31, "smoke-exit.cjs": 1, "subagents.cjs": 1, "update-worker.cjs": 26,
+  // ui-settings-mirror.cjs reads its small settings copy once per window load, synchronously so the
+  // window's settings are back before its first screen draws (0.8.173); its saves are asynchronous.
+  "ui-settings-mirror.cjs": 1,
   "update.cjs": 20, "upstream-tools.cjs": 3, "window-state.cjs": 1,
 };
 
