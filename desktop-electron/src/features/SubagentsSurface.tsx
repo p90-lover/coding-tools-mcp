@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import type { JsonObject } from "../api/contracts";
 import { listAllWorkspaces, moduleCall, watchHarnesses } from "./AgentOrchestratorSurface";
 import { AGENT_DEFAULT_MODEL, DEFAULT_WORKER_HARNESS, NATIVE_HARNESS, modelShortLabel, pickerModels, prettyModelName, providerName, rememberCpaProviders, workerRoute,
-  type AoHarness, type AoModelCapabilities, type AoModelCatalog, type AoModelLoader, type AoRoute } from "./AgentOrchestratorRoleEditor";
+  type AoHarness, catalogFromResult, type AoModelCapabilities, type AoModelCatalog, type AoModelLoader, type AoRoute } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
 import "./subagents.css";
 
@@ -161,9 +161,9 @@ const modelName = (model: string) => model.startsWith("cpa/") ? modelShortLabel(
  * when the model offers one. `fallback` is the "Default" option a subagent can keep; `like` is the
  * model a newly picked provider starts on when it serves one of the same name (the default's).
  */
-function ModelPicker({ label, route, choices, allowed, fallback, like = null, onChange }: {
+function ModelPicker({ label, route, choices, allowed, fallback, like = null, gaps = {}, onChange }: {
   label: string; route: SubagentRoute | null; choices: ModelChoice[] | null; allowed: string[] | null; fallback?: string;
-  like?: SubagentRoute | null; onChange: (route: SubagentRoute | null) => void;
+  like?: SubagentRoute | null; gaps?: Record<string, string>; onChange: (route: SubagentRoute | null) => void;
 }) {
   const known = useMemo(() => providerChoices(choices ?? []), [choices]);
   const providers = known.filter(item => providerOn(allowed, item.key));
@@ -200,6 +200,7 @@ function ModelPicker({ label, route, choices, allowed, fallback, like = null, on
       <option value="">Default effort</option>
       {efforts.map(effort => <option key={effort} value={effort}>{effort}</option>)}
     </select> : null}
+    {route && choices !== null && !current && gaps[route.model] ? <small className="sa-hint sa-model-why" role="status">{gaps[route.model]}.</small> : null}
   </span>;
 }
 
@@ -215,6 +216,7 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
   const [openReport, setOpenReport] = useState<string | null>(null);
   const [harnesses, setHarnesses] = useState<AoHarness[]>([]);
   const [choices, setChoices] = useState<ModelChoice[] | null>(null);
+  const [gaps, setGaps] = useState<Record<string, string>>({});
   const [workspaceId, setWorkspaceId] = useState(() => { try { return localStorage.getItem("coding-tools:ao:workspace") || ""; } catch { return ""; } });
 
   // The saved config the draft was last compared with; the page stays mounted between visits.
@@ -253,10 +255,7 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
     const cached = modelCache.current.get(key);
     let models = cached && Date.now() - cached.at < 60_000 ? cached.models : undefined;
     if (!models) {
-      models = moduleCall("models", { workspaceId, harness }).then(result => {
-        const names = Array.isArray(result.models) ? result.models as string[] : [];
-        return result.capabilities ? { models: names, capabilities: result.capabilities as AoModelCatalog["capabilities"] } : names;
-      });
+      models = moduleCall("models", { workspaceId, harness }).then(catalogFromResult);
       const entry = { at: Date.now(), models };
       models.catch(() => { if (modelCache.current.get(key) === entry) modelCache.current.delete(key); });
       modelCache.current.set(key, entry);
@@ -277,6 +276,8 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
         const catalogs = results.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
         for (const { catalog } of catalogs) rememberCpaProviders(catalog.capabilities);
         setChoices(modelChoices(catalogs));
+        // Why a model is not offered, as any agent's list says (Antigravity's run only in the agy chat).
+        setGaps(Object.assign({}, ...catalogs.map(({ catalog }) => catalog.unavailable ?? {})));
       });
     return () => { live = false; };
   }, [active, agentIds, loadModels]);
@@ -351,7 +352,7 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
 
       <div className={`sa-panel${settings.enabled ? "" : " is-off"}`} aria-label="Settings">
         <Row label="Default model">
-          <ModelPicker label="Default model" route={settings.defaultRoute} choices={choices} allowed={allowed} onChange={defaultRoute => setSettings({ defaultRoute })} />
+          <ModelPicker label="Default model" route={settings.defaultRoute} choices={choices} allowed={allowed} gaps={gaps} onChange={defaultRoute => setSettings({ defaultRoute })} />
         </Row>
         <Row label="Running at once">
           <NumberField label="Running at once" min={1} max={100} value={settings.maxConcurrent} onChange={maxConcurrent => setSettings({ maxConcurrent })} />
@@ -409,7 +410,7 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
             <label className="sa-label">Instructions
               <textarea className="sa-text" rows={4} maxLength={8000} value={agent.instructions} placeholder="How it works and what it reports"
                 onChange={event => setAgent(index, { instructions: event.target.value })} /></label>
-            <ModelPicker label={`${agent.name} model`} route={agent.route} choices={choices} allowed={allowed}
+            <ModelPicker label={`${agent.name} model`} route={agent.route} choices={choices} allowed={allowed} gaps={gaps}
               fallback={defaultName} like={settings.defaultRoute} onChange={route => setAgent(index, { route })} />
           </article>)}
         </div>

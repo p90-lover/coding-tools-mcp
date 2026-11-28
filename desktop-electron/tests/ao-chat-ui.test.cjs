@@ -1222,6 +1222,17 @@ test("the Subagents page's model picker lists the AO agent's own models, never W
   assert.match(page, /pickerModels\(harness, loadModels, true\)/, "the page reads each agent's own models, never WebGPT");
 });
 
+test("every model loader keeps the catalog's notes, so a picker can say why a model is not offered", () => {
+  const plainOf = (value) => JSON.parse(JSON.stringify(value));
+  assert.deepEqual(plainOf(roles.catalogFromResult({ ok: true, models: ["a", "b"] })), ["a", "b"], "no capabilities or notes: the plain list");
+  const note = "Antigravity models run only in the agy chat";
+  assert.deepEqual(plainOf(roles.catalogFromResult({ ok: true, harness: "ao:codex", models: ["cpa/a"], unavailable: { "cpa/g": note }, withheld: note, scores: { x: 1 } })),
+    { models: ["cpa/a"], unavailable: { "cpa/g": note }, withheld: note }, "the Teams and Subagents pages kept only capabilities and dropped the reason");
+  assert.deepEqual(plainOf(roles.catalogFromResult({ models: ["cpa/a"], capabilities: { "cpa/a": { efforts: [] } }, held: { "cpa/a": "cooling down" }, stale: true })),
+    { models: ["cpa/a"], capabilities: { "cpa/a": { efforts: [] } }, held: { "cpa/a": "cooling down" }, stale: true });
+  assert.deepEqual(plainOf(roles.catalogFromResult({ models: "nope", withheld: "" })), [], "a malformed answer is an empty list");
+});
+
 test("the Subagents page lists every agent's models once, and a model runs on an agent that lists it", () => {
   // Reported 2026-11-03: with Claude Code as the page's agent, Gemini 3.8 Flash was missing (Claude
   // Code's list leaves out Antigravity's models, which refuse it) and the saved default read "no longer listed".

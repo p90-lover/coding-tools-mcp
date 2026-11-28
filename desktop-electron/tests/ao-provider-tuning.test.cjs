@@ -460,10 +460,14 @@ test("the CPA catalog's provider for each model reaches the model capabilities",
       { id: "gemini-3.8-flash-high", owned_by: "antigravity" }, { id: "gpt-5.5", owned_by: "codex" }, { id: "plain-model" },
     ] }) }),
   });
-  const { capabilities } = await workflow.call("models", { harness: "codex-native" });
-  assert.equal(capabilities["gemini-3.8-flash-high"].provider, "antigravity");
+  const { capabilities, unavailable } = await workflow.call("models", { harness: "codex-native" });
   assert.equal(capabilities["gpt-5.5"].provider, "codex");
   assert.equal(capabilities["plain-model"]?.provider, undefined);
+  // Antigravity's models run only in the agy chat: Native Codex leaves them out and says why, and
+  // the direct CPA list keeps the provider.
+  assert.equal(capabilities["gemini-3.8-flash-high"], undefined);
+  assert.match(unavailable["gemini-3.8-flash-high"], /^Antigravity models run only in the agy chat/);
+  assert.equal((await workflow.call("models", {})).capabilities["gemini-3.8-flash-high"].provider, "antigravity");
 });
 
 test("a chat host that was only slow to start is retried as chat, not turned into a terminal session", async () => {
@@ -555,7 +559,7 @@ test("a model offers fast mode from Codex's own catalog, or CPA's Codex upstream
   assert.equal(codex["gpt-mini"].fast, undefined);
   assert.equal(codex["cpa/gpt-5.5"].fast, true, "any model of CPA's Codex upstream");
   assert.equal(codex["cpa/listed-fast"].fast, true, "a model whose CPA entry lists a fast tier");
-  assert.equal(codex["cpa/gemini-3.8-flash-high"].fast, undefined);
+  assert.equal(codex["cpa/gemini-3.8-flash-high"], undefined, "Antigravity's models are not offered to Codex at all (they run only in the agy chat)");
   const claude = (await workflow.call("models", { harness: "ao:claude-code" })).capabilities;
   assert.equal(claude["cpa/gpt-5.5"].fast, undefined, "a Codex model on Claude Code has no fast mode");
 });
@@ -574,7 +578,7 @@ test("Claude Code offers fast mode on Opus models CPA serves from Anthropic, Opu
   assert.equal(caps["cpa/claude-opus-5-5"].fast, true, "Anthropic's Opus through CPA: AO sends speed fast in the body");
   assert.equal(caps["cpa/claude-opus-4-6"].fast, true, "CPA's Claude sign-ins count as Anthropic too");
   assert.equal(caps["cpa/claude-sonnet-5-5"].fast, undefined, "Opus only");
-  assert.equal(caps["cpa/claude-opus-4-6-thinking"].fast, undefined, "Antigravity sends Claude to Google, where speed means nothing");
+  assert.equal(caps["cpa/claude-opus-4-6-thinking"], undefined, "Antigravity's Claude is not offered to Claude Code at all (it runs only in the agy chat)");
   assert.equal(caps["cpa/claude-opus-5"].fast, undefined, "an upstream CPA does not name is not assumed");
 });
 

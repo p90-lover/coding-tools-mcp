@@ -329,6 +329,8 @@
 .ao-route-option:hover, .ao-route-option:focus-visible { background: rgb(127 127 127 / 14%); outline: none; }
 .ao-route-option[aria-selected="true"] { background: color-mix(in srgb, var(--ao-blue) 18%, transparent); }
 .ao-route-empty { margin: 0; padding: 6px; color: var(--ao-muted); font-size: 12px; }
+/* Why some of CPA's models are not in the list (Antigravity's run only in the agy chat). */
+.ao-route-note { border-top: 1px solid rgb(127 127 127 / 18%); line-height: 1.45; }
 .ao-route-option small { flex: none; color: var(--ao-muted); font-size: 10px; }
 .ao-role-inspector form { display: flex; flex-direction: column; gap: 10px; }
 .ao-inspector-tabs { display: flex; gap: 2px; padding: 2px; border-radius: 7px; background: rgb(255 255 255 / 5%); }
@@ -616,6 +618,8 @@
 .ao-workflow .ao-model-popup > h4 { order: 3; margin: 3px 0 -4px; font-size: 12px; }
 /* Only the rows scroll: the search stays put, and short split panes can shrink the list. */
 .ao-workflow .ao-model-options { order: 4; flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-gutter: stable; }
+/* Why some of CPA's models are not in this harness's list (Antigravity's run only in the agy chat). */
+.ao-workflow .ao-model-options .ao-model-note { margin: 6px 0 2px; padding: 6px 8px 0; border-top: 1px solid rgb(127 127 127 / 18%); }
 .ao-workflow .ao-picker-option { display: flex; align-items: center; width: 100%; gap: 10px; margin: 3px 0; padding: 9px 8px; border: 0; border-radius: 7px; background: #fff; color: #27384f; text-align: left; cursor: pointer; }
 .ao-workflow .ao-picker-option[aria-checked="true"] { background: #edf6ff; color: #122742; }
 .ao-workflow .ao-picker-option > span:nth-child(2) { flex: 1; min-width: 0; overflow-wrap: anywhere; }

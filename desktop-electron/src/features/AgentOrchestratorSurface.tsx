@@ -24,7 +24,7 @@ import { CHAT_PAGES_STORE, ChatPagesContext, chatPageKey, readPageSelection, typ
 import { createLatestConfigQueue } from "./ao-config";
 import {
   AGENT_DEFAULT_MODEL, AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings, starterSettings,
-  cardMeta, harnessLabel, modelLabel, modelShortLabel, teamForMission, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam, type RoleSettings,
+  cardMeta, harnessLabel, modelLabel, modelShortLabel, teamForMission, workerRoute, type AoHarness, catalogFromResult, type AoModelLoader, type AoRoute, type AoTeam, type RoleSettings,
 } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
 import "./codex-chat.css";
@@ -883,12 +883,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     let pending = cached && Date.now() - cached.at < 60_000 ? cached.models : undefined;
     if (!pending) {
       // Both catalogs carry model capabilities when their source reports them.
-      pending = moduleCall("models", { harness, workspaceId }).then(result => {
-        const models = Array.isArray(result.models) ? result.models as string[] : [];
-        return result.capabilities || result.unavailable || result.held ? { models, ...(result.capabilities ? { capabilities: result.capabilities as AoModelCatalog["capabilities"] } : {}),
-          ...(result.unavailable ? { unavailable: result.unavailable as AoModelCatalog["unavailable"] } : {}),
-          ...(result.held ? { held: result.held as AoModelCatalog["held"] } : {}), ...(result.stale === true ? { stale: true } : {}) } : models;
-      });
+      pending = moduleCall("models", { harness, workspaceId }).then(catalogFromResult);
       const entry = { at: Date.now(), models: pending };
       const forget = () => { if (modelCache.current.get(key) === entry) modelCache.current.delete(key); };
       // The remembered list (CPA could not be read) is asked for again next time, not kept a minute.
