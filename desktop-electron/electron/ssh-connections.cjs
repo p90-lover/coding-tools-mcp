@@ -20,6 +20,12 @@
 // - The in-app terminal (terminal_open) opens only to an approved host, after the pinned file is
 //   written again, and AO starts ssh from the host's typed fields; this store closes only the
 //   terminals it opened (milestone 2, 2026-11-27).
+// - Agents run one command on an approved host through the app's ssh_exec tool (exec, milestone 3,
+//   2026-11-28): the agent gives a host id and the remote command, never an option, a key, a config
+//   or a host name; this module builds the rest (execArgv) and hands back the output cleaned of
+//   terminal escapes and cut to size, as text from a host the app does not trust. exec is not an
+//   app-module operation: the window has the terminal, and only the chat tools call exec, after the
+//   SSH rules judged that host and that command (chat-agent-tools.cjs, ssh-request.cjs).
 // - Logs carry event names, a host id and counts. Never a host name, a path, a command line or a
 //   fingerprint.
 //
@@ -52,6 +58,21 @@ const TERMINAL_HANDLE = /^[\w:.-]{1,200}$/;
 /** The longest terminal title AO's SSH route takes. */
 const TERMINAL_TITLE_CHARS = 80;
 const STATES = Object.freeze(["draft", "pinned", "changed"]);
+/** ssh_exec's remote command: its longest form, in characters (the reviewer must read it whole). */
+const EXEC_COMMAND_CHARS = 4000;
+/** ssh_exec's wall-clock limits: no ssh option bounds how long the remote command runs. */
+const EXEC_DEFAULT_TIMEOUT_MS = 60_000;
+const EXEC_MIN_TIMEOUT_MS = 1_000;
+const EXEC_MAX_TIMEOUT_MS = 120_000;
+/** What an agent gets of each stream once cleaned, in characters; the runner keeps more, to tell a cut. */
+const EXEC_STDOUT_CHARS = 24_000;
+const EXEC_STDERR_CHARS = 8_000;
+const EXEC_CAPTURE_BYTES = 64 * 1024;
+/** ssh_exec commands running at once, from every chat: each one is a new connection and sign-in. */
+const EXEC_MAX_RUNNING = 4;
+// Characters that show as nothing or turn the text around them: the command the person and the
+// reviewer read would not be the one that runs, and output with them could pass for other text.
+const INVISIBLE = /[\u200b-\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029\ufeff]/;
 const PINNED_FILE_HEADER = "# Coding Tools writes this file from its SSH hosts list. Changes made here are lost.";
 
 /** A refusal worded for the person: its message is shown on the hosts page as it is. */
@@ -441,6 +462,106 @@ function terminalArgv({ host, port, user, identityFile = null, state, knownHosts
   ];
 }
 
+/**
+ * What is wrong with ssh_exec's remote command, or null. One line of visible text: a line break
+ * would make it a script whose later lines the person's card may never show, and a control or an
+ * invisible character would make what they read differ from what runs.
+ */
+function execCommandProblem(command) {
+  if (typeof command !== "string" || !command.trim()) return "Give the command to run on the host.";
+  if (command.length > EXEC_COMMAND_CHARS) {
+    return `The command is longer than ${EXEC_COMMAND_CHARS} characters. Put the steps in a script on the host, or run them one at a time.`;
+  }
+  if (/[\r\n]/.test(command)) return "The command must be one line. Join the steps with && or ;, or run them one at a time.";
+  if (/[\x00-\x08\x0b-\x1f\x7f-\x9f]/.test(command)) return "The command cannot contain control characters.";
+  if (INVISIBLE.test(command)) return "The command cannot contain invisible or direction-changing characters.";
+  return null;
+}
+
+/** How long one ssh_exec command may run: the agent's timeout_ms within the limits, else the default. */
+function execTimeout(value) {
+  if (value === undefined || value === null) return EXEC_DEFAULT_TIMEOUT_MS;
+  if (!Number.isInteger(value)) {
+    throw new SshHostsError(`timeout_ms: give whole milliseconds, from ${EXEC_MIN_TIMEOUT_MS} to ${EXEC_MAX_TIMEOUT_MS}.`, "invalid");
+  }
+  return Math.min(EXEC_MAX_TIMEOUT_MS, Math.max(EXEC_MIN_TIMEOUT_MS, value));
+}
+
+/**
+ * ssh_exec's command line: one remote command on a pinned host, with nothing anyone could be asked.
+ * The server must show the pinned key; only key sign-in is tried and BatchMode=yes leaves no prompt
+ * to wait on; no terminal (-T) and no input (-n). The command is one argv element after `-- host`:
+ * ssh reads no option in it (options end at "--"), and no shell on this machine reads it at all.
+ * Every option is in OpenSSH 7.6, or switched by version as the probe's are (an unknown option is
+ * fatal). With a key file only that key is offered; without one, ssh tries its default key files
+ * (~/.ssh/id_*), as the in-app terminal does; no agent is asked either way (IdentityAgent=none).
+ */
+function execArgv({ host, port, user, identityFile = null, state, knownHostsFile, client = null, platform = process.platform, command }) {
+  if (state !== "pinned") throw new SshHostsError("Confirm this host's key on the SSH hosts page before agents run commands on it.", "not_pinned");
+  if (!clientAtLeast(client, 7, 6)) throw new SshHostsError("This computer's OpenSSH is too old for the app's SSH settings. Update OpenSSH, then try again.", "old_client");
+  const problem = execCommandProblem(command);
+  if (problem) throw new SshHostsError(problem, "invalid_command");
+  const key = validateIdentityFile(identityFile, { platform });
+  if (!key.ok) throw new SshHostsError(key.error, "invalid");
+  return [
+    "-F", "none",
+    ...optionArguments([
+      ...hostKeyOptions("yes", knownHostsFile, client, platform),
+      ...LOCKED_OPTIONS,
+      ["BatchMode", "yes"],
+      ["PreferredAuthentications", "publickey"], ["PasswordAuthentication", "no"],
+      [clientAtLeast(client, 8, 7) ? "KbdInteractiveAuthentication" : "ChallengeResponseAuthentication", "no"],
+      ["ConnectTimeout", "10"], ["ConnectionAttempts", "1"],
+      ["ServerAliveInterval", "15"], ["ServerAliveCountMax", "3"],
+      // ssh's own notices, the server's pre-login banner among them, stay out of stderr: errors only.
+      ["LogLevel", "ERROR"],
+      ...(key.value ? [["IdentitiesOnly", "yes"]] : []),
+    ]),
+    ...(key.value ? ["-i", key.value] : []),
+    "-T", "-n", ...destination({ host, port, user }), command,
+  ];
+}
+
+/**
+ * A stream from the remote host as an agent may read it, { text, cut }. The host is not trusted:
+ * terminal escape sequences (colours, cursor moves, window titles, hyperlinks, clipboard writes),
+ * every other control character but tab and line feed, and the invisible and direction-changing
+ * characters are taken out; a carriage return becomes a line feed; then it is cut at `limit`.
+ */
+function untrustedText(value, limit) {
+  let text = String(value ?? "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    // OSC (titles, OSC 8 links, OSC 52 clipboard), DCS, SOS, PM and APC, up to their end or the text's.
+    .replace(/\x1b[\]PX^_][\s\S]*?(?:\x07|\x1b\\|$)/g, "")
+    .replace(/\x9b[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\x90\x98\x9d\x9e\x9f][\s\S]*?(?:\x07|\x9c|$)/g, "")
+    .replace(/\x1b[ -/]*[0-~]?/g, "")
+    .replace(/\r/g, "\n")
+    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "")
+    .replace(new RegExp(INVISIBLE.source, "g"), "");
+  const cut = text.length > limit;
+  if (cut) text = text.slice(0, limit).replace(/[\ud800-\udbff]$/, "");
+  return { text, cut };
+}
+
+/** Why ssh itself ended with 255, said plainly from its own error lines (they are not repeated). */
+function execFailure(stderr) {
+  const said = String(stderr ?? "");
+  if (/host key verification failed|remote host identification has changed|host key for .* has changed|no .*host key is known/i.test(said)) {
+    return "The host did not show the key you confirmed, so ssh stopped before signing in. Check its key on the SSH hosts page.";
+  }
+  if (/permission denied/i.test(said)) {
+    return "The host did not accept the key for this user. ssh_exec signs in with a key only, never a password, and cannot type a key's passphrase.";
+  }
+  if (/load key|bad permissions|unprotected private key/i.test(said)) return "ssh could not use this host's key file (its permissions, or a passphrase it cannot ask for).";
+  if (/could not resolve hostname/i.test(said)) return "The host name could not be found.";
+  if (/connection refused/i.test(said)) return "The host refused the connection. Check its port.";
+  if (/timed out/i.test(said)) return "The host did not answer in time.";
+  if (/bad configuration option|unsupported option/i.test(said)) return "This computer's OpenSSH did not accept the app's settings. Update OpenSSH.";
+  return "ssh ended with 255: the connection or the sign-in most likely failed (a remote command can also end with 255).";
+}
+
 function publicKey(key) {
   return key ? { type: key.type, fingerprint: key.fingerprint, pinnedAt: key.pinnedAt, method: key.method } : null;
 }
@@ -535,9 +656,12 @@ function probeFailure(reason, stderr = "") {
   return `The server sent no host key. Check the host, the port and your network, then try again. ${NOTHING_SAVED}`;
 }
 
-/** Starts the program itself with an argv array: no shell, no window, nothing on its input. */
-async function runProgram(executable, argv, { timeoutMs, env, cwd } = {}) {
-  const reply = await runOffThread({ file: executable, args: argv, cwd, env, timeoutMs, maxBytes: 64 * 1024 });
+/**
+ * Starts the program itself with an argv array: no shell, no window, nothing on its input. Each
+ * stream keeps at most `maxBytes`; a timeout ends the program's whole tree (off-thread-run.cjs).
+ */
+async function runProgram(executable, argv, { timeoutMs, env, cwd, maxBytes = 64 * 1024 } = {}) {
+  const reply = await runOffThread({ file: executable, args: argv, cwd, env, timeoutMs, maxBytes });
   if (reply?.timedOut) return { code: null, stdout: "", stderr: "", timedOut: true };
   if (reply?.error || typeof reply?.code !== "number") return { code: null, stdout: "", stderr: "", failed: true };
   return { code: reply.code, stdout: reply.stdout, stderr: reply.stderr };
@@ -582,8 +706,8 @@ function openRefusal(error) {
 }
 
 /**
- * The SSH hosts store. `run(executable, argv, { timeoutMs, env, cwd })` resolves { code, stdout,
- * stderr } (and timedOut: true when it ended the program at the limit). `after`, when given, is
+ * The SSH hosts store. `run(executable, argv, { timeoutMs, env, cwd, maxBytes })` resolves { code,
+ * stdout, stderr } (and timedOut: true when it ended the program at the limit). `after`, when given, is
  * awaited before the store file is read: the store this one replaces must have finished writing.
  * `openTerminal({ host, port, user, identityFile, title, client: { major, minor } })` opens the
  * in-app terminal through AO and resolves { handle, generation, title }; `closeTerminal(handle)`
@@ -629,6 +753,8 @@ function createSshConnections({
   let opening = false;
   // Counts closeAll calls: a terminal that arrives after one began belongs to a page that is gone.
   let closeEpoch = 0;
+  // ssh_exec commands running now (exec), at most EXEC_MAX_RUNNING.
+  let execRunning = 0;
   const timestamp = () => new Date(now()).toISOString();
   const log = (level, event, fields = {}) => { try { logger?.[level]?.(event, fields); } catch { /* a log never fails an action */ } };
   const writeOptions = { durable: durable !== false, protectDirectory: false };
@@ -1207,6 +1333,97 @@ function createSshConnections({
   }
 
   /**
+   * What an ssh_exec command waits for, in the change queue, as a terminal does (terminalReady): a
+   * client, a host approved now (pinned, its server not known to show another key), its key file
+   * still there, and the pinned file written again from the list. Resolves the command line.
+   */
+  async function execReady(record, command) {
+    if (!stillApproved(record.id)) {
+      refuse("This host is not approved now: its key is not confirmed, or its server showed another key. Check it on the SSH hosts page.", "not_pinned");
+    }
+    const info = await clientInfo();
+    if (!info) refuse("OpenSSH was not found on this computer, so nothing ran.", "no_client");
+    const argv = execArgv({ ...record, knownHostsFile, client: info, platform, command });
+    // A key file that is gone is not skipped by ssh: it drops -i and offers the default keys instead.
+    if (record.identityFile && !(await fileExists(record.identityFile))) {
+      refuse("This host's key file is no longer there, so nothing ran. Put it back, or remove the host and add it again.", "key_file_missing");
+    }
+    try {
+      await writePinned();
+    } catch (error) {
+      log("error", "ssh.pinned_write_failed", { code: errorCode(error) });
+      refuse("The pinned keys file could not be written, so nothing ran. Try again.", "pinned_write_failed");
+    }
+    return argv;
+  }
+
+  /**
+   * ssh_exec: runs one command on an approved host and answers { ok, host, outcome, exitCode,
+   * stdout, stderr, ... } or { ok: false, error, code }. For the chat tools only, once the SSH
+   * rules have judged this host and this command; never an app-module operation. The checks and
+   * the pinned file's rewrite run in the change queue; ssh runs outside it, so a slow command holds
+   * up no change to the list. A host removed or blocked meanwhile is out of the pinned file by then,
+   * and ssh, checking the key against that file, stops before it signs in.
+   *
+   * Outcome: "completed" (exit 0), "failed" (the command's own non-zero exit), "ssh_failed" (exit
+   * 255, ssh's own failure as a rule, with `reason`) or "timed_out" (ssh was ended at the limit;
+   * the command may still run on the host). The output is the host's: cleaned and cut
+   * (untrustedText), never logged.
+   */
+  function execCommand(args) {
+    return answered("exec", async () => {
+      const input = argumentsOf(args, ["id", "command", "timeoutMs"]);
+      const problem = execCommandProblem(input.command);
+      if (problem) refuse(problem, "invalid_command");
+      const timeoutMs = execTimeout(input.timeoutMs);
+      if (execRunning >= EXEC_MAX_RUNNING) {
+        refuse(`${EXEC_MAX_RUNNING} SSH commands are running already. Wait for one to finish, then try again.`, "busy");
+      }
+      execRunning += 1;
+      let hostId = null;
+      try {
+        let prepared;
+        await change(async () => {
+          const record = found(input.id);
+          hostId = record.id;
+          prepared = { argv: await execReady(record, input.command), host: { id: record.id, label: record.label, production: record.production } };
+        });
+        await fs.promises.mkdir(probeDir, { recursive: true, mode: 0o700 });
+        const started = now();
+        let result;
+        try {
+          // A folder of the app's own to start in, never the chat's worktree.
+          result = await run(program, prepared.argv, { timeoutMs, env: environment(), cwd: probeDir, maxBytes: EXEC_CAPTURE_BYTES });
+        } catch {
+          result = { failed: true };
+        }
+        const durationMs = Math.max(0, now() - started);
+        if (result?.timedOut) {
+          log("warn", "ssh.exec_finished", { hostId, outcome: "timed_out", durationMs });
+          return { ok: true, host: prepared.host, outcome: "timed_out", exitCode: null, durationMs, stdout: "", stderr: "", stdoutCut: false, stderrCut: false,
+            reason: `It ran past ${Math.round(timeoutMs / 1000)} seconds, so ssh was ended and its output dropped. The command may still be running on the host.` };
+        }
+        if (result?.failed || typeof result?.code !== "number") refuse("OpenSSH could not be started on this computer, so nothing ran.", "not_started");
+        const stdout = untrustedText(result.stdout, EXEC_STDOUT_CHARS);
+        const stderr = untrustedText(result.stderr, EXEC_STDERR_CHARS);
+        const outcome = result.code === 0 ? "completed" : result.code === 255 ? "ssh_failed" : "failed";
+        log(outcome === "completed" ? "info" : "warn", "ssh.exec_finished", { hostId, outcome, exitCode: result.code, durationMs,
+          stdoutChars: stdout.text.length, stderrChars: stderr.text.length });
+        return {
+          ok: true, host: prepared.host, outcome, exitCode: result.code, durationMs,
+          ...(outcome === "ssh_failed" ? { reason: execFailure(result.stderr) } : {}),
+          stdout: stdout.text, stderr: stderr.text, stdoutCut: stdout.cut, stderrCut: stderr.cut,
+        };
+      } catch (error) {
+        if (error instanceof SshHostsError) log("warn", "ssh.exec_refused", { ...(hostId ? { hostId } : {}), code: error.code });
+        throw error;
+      } finally {
+        execRunning -= 1;
+      }
+    });
+  }
+
+  /**
    * Closes every terminal this store opened, best effort, and forgets them: the page went away (a
    * reload, a renderer crash), its window closed, the backend restarts or the app quits, and nothing
    * on screen could reach them again. A terminal on its way is closed as it arrives (terminalOpen).
@@ -1252,6 +1469,8 @@ function createSshConnections({
     confirmKey: (args) => call("confirm_key", args),
     approvedHosts,
     terminalCommand,
+    // ssh_exec, for the chat tools (chat-agent-tools.cjs): not in `call`, so the window never reaches it.
+    exec: execCommand,
     call,
     closeAll,
     dispose,
@@ -1260,11 +1479,21 @@ function createSshConnections({
 
 module.exports = {
   DEFAULT_PORT,
+  EXEC_COMMAND_CHARS,
+  EXEC_DEFAULT_TIMEOUT_MS,
+  EXEC_MAX_RUNNING,
+  EXEC_MAX_TIMEOUT_MS,
+  EXEC_MIN_TIMEOUT_MS,
+  EXEC_STDERR_CHARS,
+  EXEC_STDOUT_CHARS,
   OPERATIONS,
   PROBE_TIMEOUT_MS,
   SshHostsError,
   childEnvironment,
   createSshConnections,
+  execArgv,
+  execCommandProblem,
+  execFailure,
   fingerprintOf,
   knownHostsLine,
   knownHostsName,
@@ -1275,6 +1504,7 @@ module.exports = {
   publicHost,
   sshProgram,
   terminalArgv,
+  untrustedText,
   validateHost,
   validateIdentityFile,
   validateLabel,
