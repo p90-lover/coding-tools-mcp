@@ -54,7 +54,9 @@ const ALLOWED = {
   "relaunch-guard.cjs": 6,
   "rtk.cjs": 4, "runtime-command.cjs": 6, "runtime-install.cjs": 24,
   // runtime.cjs 39 -> 31 (2026-11-19): setup's checkpoint reads (captureRegularFile) went asynchronous.
-  "runtime-supervisor.cjs": 18, "runtime.cjs": 31, "smoke-exit.cjs": 1, "subagents.cjs": 1, "update-worker.cjs": 26,
+  // runtime-supervisor.cjs +1 (2026-11-28): reading the redirect file runs only while one exists, i.e.
+  // while Windows refuses the ownership marker, plus once per run to find out it is missing.
+  "runtime-supervisor.cjs": 19, "runtime.cjs": 31, "smoke-exit.cjs": 1, "subagents.cjs": 1, "update-worker.cjs": 26,
   "update.cjs": 20, "upstream-tools.cjs": 3, "window-state.cjs": 1,
 };
 

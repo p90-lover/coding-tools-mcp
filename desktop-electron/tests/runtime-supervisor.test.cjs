@@ -20,6 +20,54 @@ const {
   windowsProcessInfo,
 } = require("../electron/runtime-supervisor.cjs");
 
+test("a marker Windows refuses moves ownership to the redirect file: written, read back and cleared without throwing", () => {
+  // Seen 2026-11-27/28: Bitdefender kept launcher-supervisor.json, a file it had restored from
+  // quarantine, refused for hours. Every runtime start failed on it and was retried every 2 minutes
+  // (1.4 s of rename retries on the main thread each time), and quitting hung because clearing it
+  // threw EPERM inside the forced shutdown.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-state-refused-"));
+  const marker = path.join(root, "runtime", "launcher-supervisor.json");
+  const redirect = path.join(root, "runtime", "launcher-supervisor.redirect.json");
+  const refused = Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+  let blocked = true;
+  const writes = [], warnings = [];
+  const stateFiles = {
+    write: (file, text) => {
+      writes.push(path.basename(file));
+      if (blocked && file === marker) throw refused;
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, text);
+    },
+    remove: (file) => { if (blocked && file === marker) throw refused; fs.rmSync(file, { force: true }); },
+  };
+  const options = { app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn: (event) => warnings.push(event), error() {} },
+    sourceRoot: root, coreHome: root, browserDescriptorPath: path.join(root, "runtime", "launcher-browser.json"), stateFiles };
+  // The refused marker as the earlier owner left it.
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, JSON.stringify({ version: 1, ownerPid: 4242, daemonPid: null, tunnelPid: null, status: "ready", updatedAt: "2026-11-26T09:36:43.000Z" }));
+  const supervisor = new RuntimeSupervisor(options);
+
+  assert.equal(supervisor.writeState("ready").status, "ready", "a refused marker does not fail the write");
+  assert.deepEqual(writes, ["launcher-supervisor.json", "launcher-supervisor.redirect.json"]);
+  assert.deepEqual(warnings, ["runtime.state_redirected"], "said once");
+  assert.equal(supervisor.readState().ownerPid, process.pid, "the newer redirected state outranks the refused marker");
+  supervisor.writeState("degraded", "MCP tunnel is not ready yet");
+  assert.equal(writes.filter((file) => file === "launcher-supervisor.json").length, 1, "the refused marker is tried once per run");
+  assert.equal(supervisor.readState().status, "degraded");
+
+  supervisor.clearState(); // what the forced shutdown calls at quit
+  assert.equal(supervisor.readState(), null, "a cleared record outranks the refused marker");
+  assert.equal(fs.existsSync(marker), true, "the refused marker itself is left where it is");
+
+  // After a restart the marker can be written again: it is, and the redirect file goes.
+  blocked = false;
+  const next = new RuntimeSupervisor(options);
+  next.writeState("ready");
+  assert.equal(fs.existsSync(redirect), false, "the redirect file is removed once the marker works");
+  assert.equal(next.readState().status, "ready");
+});
+
 function tunnelPreparationFixture() {
   const coreHome = path.resolve(__dirname, "../aiTemp/virtual-tunnel-preparation");
   const primary = path.join(coreHome, "tunnel", "primary-runtime"), legacy = path.join(coreHome, "legacy");
@@ -2662,8 +2710,10 @@ test("the ownership marker is written without a flush; only flushed writes pay f
   // The flush held every window up to 2.5 s; a marker a power cut tears is set aside at the next
   // start instead (the torn and before-boot tests above), as every process it names died with it.
   const source = fs.readFileSync(path.join(__dirname, "..", "electron", "runtime-supervisor.cjs"), "utf8");
-  assert.match(source, /writePrivateFileAtomic\(this\.statePath, `\$\{JSON\.stringify\(state, null, 2\)\}\\n`\);/);
-  assert.doesNotMatch(source, /writePrivateFileAtomic\(this\.statePath, [^\n]*durable/);
+  // The marker (and its redirect file, while Windows refuses the marker) is written by stateFiles.write.
+  assert.match(source, /this\.persistState\(`\$\{JSON\.stringify\(state, null, 2\)\}\\n`\);/);
+  assert.match(source, /write: \(file, text\) => writePrivateFileAtomic\(file, text\),/);
+  assert.doesNotMatch(source, /writePrivateFileAtomic\(file, text, [^\n]*durable/);
   const { writePrivateFileAtomic } = require("../electron/atomic-file.cjs");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-durable-write-"));
   const synced = [];
