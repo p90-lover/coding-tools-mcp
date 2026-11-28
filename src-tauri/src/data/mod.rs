@@ -1,5 +1,6 @@
 mod migrate;
 mod model;
+mod staged_write;
 mod store;
 pub mod workspace_edit;
 

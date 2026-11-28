@@ -1,4 +1,4 @@
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,6 +8,7 @@ use crate::platform::platform;
 use crate::settings::AppSettings;
 
 use super::model::{AppData, LegacyProfilesOnlyFile};
+use super::staged_write::{self, StagedFile};
 
 const LEGACY_PROFILES_FILE: &str = "profiles.json";
 const LEGACY_SETTINGS_FILE: &str = "app_settings.json";
@@ -16,6 +17,9 @@ const LEGACY_SETTINGS_FILE: &str = "app_settings.json";
 thread_local! { static TEST_DATA_FILE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) }; }
 #[cfg(test)]
 thread_local! { static FAIL_NEXT_VALID_BACKUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+// The next rename at this stage fails as a refused rename would (see rename_data_file).
+#[cfg(test)]
+thread_local! { static FAIL_NEXT_RENAME_AT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) }; }
 
 // Fixtures that replace the process-wide trusted-origin registry or saturate
 // process-wide HTTP admission must own that shared resource, even when the Rust
@@ -133,6 +137,8 @@ pub fn data_file_path() -> AppResult<PathBuf> {
 pub fn load_or_migrate() -> AppResult<AppData> {
     let path = data_file_path()?;
     let app_root = app_root_for(&path)?;
+    // The first load in a process: staged copies an earlier failed save left are garbage now.
+    staged_write::sweep_stale_once(&staged_write::staged_dir(&app_root));
     if path.exists() {
         return load_or_recover_at(&path, &app_root);
     }
@@ -229,36 +235,47 @@ fn profile_io(stage: &str, error: std::io::Error) -> AppError {
     ))
 }
 
+/// Saves `data` as the data file at `path`. After a failed save the next ones wait, doubling up
+/// to five minutes (see staged_write): a save that waits stages nothing and fails at once, and
+/// the failure is reported once, not on every retry.
 fn write_data_at(path: &Path, app_root: &Path, data: &AppData) -> AppResult<()> {
+    if let Some(paused) = staged_write::paused(path) {
+        return Err(AppError::Io(paused));
+    }
+    let result = install_data_at(path, app_root, data);
+    match &result {
+        Ok(()) => {
+            if let Some(failures) = staged_write::record_success(path) {
+                eprintln!("Profile data saved again after {failures} failed saves");
+            }
+        }
+        Err(error) => {
+            if staged_write::record_failure(path, error) {
+                eprintln!(
+                    "Profile data could not be saved: {error}. Until a save works, saves wait \
+                     longer after each failure (up to 5 minutes) and this is not reported again. \
+                     If an antivirus restored or guards the app's data folder, allow the app to \
+                     change it."
+                );
+            }
+        }
+    }
+    result
+}
+
+fn install_data_at(path: &Path, app_root: &Path, data: &AppData) -> AppResult<()> {
     // Counted before anything moves, so a reader that saw the old count reads the file again.
     count_data_write(path);
     let Some(parent) = path.parent() else {
         return Err(AppError::Message("profile data path has no parent".into()));
     };
     fs::create_dir_all(parent).map_err(|error| profile_io("data directory", error))?;
-    let temp_dir = app_root.join("aiTemp").join("data-write");
+    let temp_dir = staged_write::staged_dir(app_root);
     fs::create_dir_all(&temp_dir).map_err(|error| profile_io("temporary directory", error))?;
-    let temp_path = temp_dir.join(unique_name("profiles", "tmp"));
     let text = serde_json::to_string_pretty(data)?;
-    {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&temp_path)
-            .map_err(|error| profile_io("create temporary file", error))?;
-        restrict_file_permissions(&temp_path)?;
-        file.write_all(text.as_bytes())
-            .map_err(|error| profile_io("write temporary file", error))?;
-        file.write_all(b"\n")
-            .map_err(|error| profile_io("write temporary file", error))?;
-        file.sync_all()
-            .map_err(|error| profile_io("sync temporary file", error))?;
-    }
+    // From here every early return drops `staged`, which removes the copy: on 2026-11-28 each
+    // failed save left its full copy (21 MB) here, until the drive was full.
+    let staged = stage_data_file(&temp_dir, &text)?;
 
     let previous_backup = if path.exists() {
         Some(move_to_trash(
@@ -272,14 +289,18 @@ fn write_data_at(path: &Path, app_root: &Path, data: &AppData) -> AppResult<()> 
         None
     };
 
-    if let Err(error) = fs::rename(&temp_path, path) {
+    if let Err(error) = rename_data_file("install data file", staged.path(), path) {
         if !path.exists() {
             if let Some(backup) = previous_backup.as_ref() {
-                let _ = fs::copy(backup, path);
+                // Moving the previous file back restores it without writing another full copy.
+                if fs::rename(backup, path).is_err() {
+                    let _ = fs::copy(backup, path);
+                }
             }
         }
-        return Err(profile_io("install data file", error));
+        return Err(error);
     }
+    staged.installed();
     // The installed inode already has the staged file's restricted permissions.
     // Backup maintenance cannot undo this commit or discard its caller's result.
     match copy_valid_backup(path, app_root) {
@@ -287,6 +308,82 @@ fn write_data_at(path: &Path, app_root: &Path, data: &AppData) -> AppResult<()> 
         Err(_) => eprintln!("Profile data was saved; recovery backup maintenance failed"),
     }
     Ok(())
+}
+
+/// Writes `text` to a new staged copy in `temp_dir`. The copy is removed again if any step
+/// after creating it fails.
+fn stage_data_file(temp_dir: &Path, text: &str) -> AppResult<StagedFile> {
+    let temp_path = temp_dir.join(unique_name(
+        staged_write::STAGED_PREFIX,
+        staged_write::STAGED_EXTENSION,
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(&temp_path)
+        .map_err(|error| profile_io("create temporary file", error))?;
+    let staged = StagedFile::new(temp_path);
+    // The file is moved in and closed there, before `staged` can drop and remove it.
+    fill_staged_file(file, staged.path(), text)?;
+    Ok(staged)
+}
+
+fn fill_staged_file(mut file: File, path: &Path, text: &str) -> AppResult<()> {
+    restrict_file_permissions(path)?;
+    file.write_all(text.as_bytes())
+        .map_err(|error| profile_io("write temporary file", error))?;
+    file.write_all(b"\n")
+        .map_err(|error| profile_io("write temporary file", error))?;
+    file.sync_all()
+        .map_err(|error| profile_io("sync temporary file", error))
+}
+
+/// Waits before trying a refused rename again. On Windows a scanner or indexer that has the
+/// file open for a moment refuses it (access denied, sharing or lock violation); a few short
+/// retries of the same rename ride that out without staging the whole store again. A file that
+/// keeps refusing, as one an antivirus restored from quarantine did, still fails the save.
+#[cfg(windows)]
+const RENAME_RETRY_WAITS: &[std::time::Duration] = &[
+    std::time::Duration::from_millis(20),
+    std::time::Duration::from_millis(60),
+    std::time::Duration::from_millis(150),
+];
+#[cfg(not(windows))]
+const RENAME_RETRY_WAITS: &[std::time::Duration] = &[];
+
+fn rename_refused_for_now(error: &std::io::Error) -> bool {
+    // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION.
+    cfg!(windows) && matches!(error.raw_os_error(), Some(5 | 32 | 33))
+}
+
+/// Renames a data file. ReplaceFileW is no way round a refused rename: it needs the same delete
+/// access to the file it replaces, and std's rename already retries a denied rename with the
+/// read-only attribute ignored.
+fn rename_data_file(stage: &'static str, from: &Path, to: &Path) -> AppResult<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_RENAME_AT.with(|fail| fail.get() == Some(stage)) {
+        FAIL_NEXT_RENAME_AT.with(|fail| fail.set(None));
+        return Err(profile_io(
+            stage,
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        ));
+    }
+    let mut waits = RENAME_RETRY_WAITS.iter();
+    loop {
+        let error = match fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        match waits.next() {
+            Some(wait) if rename_refused_for_now(&error) => std::thread::sleep(*wait),
+            _ => return Err(profile_io(stage, error)),
+        }
+    }
 }
 
 /// Backups kept of the data file. Every save added two full copies and none was ever removed:
@@ -354,7 +451,7 @@ fn move_to_trash(
     let dir = app_root.join("Trash").join(category);
     fs::create_dir_all(&dir)?;
     let target = dir.join(unique_name(prefix, extension));
-    fs::rename(path, &target).map_err(|error| profile_io("archive previous data", error))?;
+    rename_data_file("archive previous data", path, &target)?;
     Ok(target)
 }
 
@@ -606,6 +703,8 @@ mod tests {
                 "workspace-write"
             );
             fs::remove_file(&blocker).unwrap();
+            // The failed save started the wait before the next one; the blocker is gone now.
+            staged_write::expire_wait(&path);
             with_failed_valid_backup(|| {
                 commit_updates(vec![(context.clone(), policy, "core".into())], persist)
             })
@@ -645,6 +744,200 @@ mod tests {
         };
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert!(error.to_string().contains("create temporary file"));
+    }
+
+    fn with_refused_rename<R>(stage: &'static str, f: impl FnOnce() -> R) -> R {
+        struct Restore(Option<&'static str>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                FAIL_NEXT_RENAME_AT.with(|fail| fail.set(self.0));
+            }
+        }
+        let _restore = Restore(FAIL_NEXT_RENAME_AT.with(|fail| fail.replace(Some(stage))));
+        f()
+    }
+
+    fn staged_copies(app_root: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(staged_write::staged_dir(app_root)) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("tmp"))
+            .collect()
+    }
+
+    fn file_count(dir: &Path) -> usize {
+        fs::read_dir(dir).map_or(0, |entries| entries.count())
+    }
+
+    fn saved(id: &str) -> AppData {
+        AppData {
+            last_workspace_id: id.into(),
+            ..AppData::default()
+        }
+    }
+
+    #[test]
+    fn refused_install_removes_the_staged_copy_and_puts_the_previous_file_back() {
+        let root = profile_commit_fixture();
+        let path = root.path().join("data/profiles.json");
+        write_data_at(&path, root.path(), &saved("before")).unwrap();
+        let backups = root.path().join("Trash/data-backups");
+        let backup_count = file_count(&backups);
+        let failure = with_refused_rename("install data file", || {
+            write_data_at(&path, root.path(), &saved("after"))
+        })
+        .unwrap_err();
+        assert!(failure
+            .to_string()
+            .contains("Profile persistence (install data file)"));
+        assert_eq!(staged_copies(root.path()), Vec::<PathBuf>::new());
+        assert_eq!(read_valid_data(&path).unwrap().last_workspace_id, "before");
+        // Moved back, not copied: a failed save adds no full copy anywhere.
+        assert_eq!(file_count(&backups), backup_count);
+        staged_write::record_success(&path);
+    }
+
+    #[test]
+    fn refused_rename_of_the_live_file_removes_the_staged_copy() {
+        let root = profile_commit_fixture();
+        let path = root.path().join("data/profiles.json");
+        write_data_at(&path, root.path(), &saved("before")).unwrap();
+        let backups = root.path().join("Trash/data-backups");
+        let backup_count = file_count(&backups);
+        let failure = with_refused_rename("archive previous data", || {
+            write_data_at(&path, root.path(), &saved("after"))
+        })
+        .unwrap_err();
+        assert!(failure
+            .to_string()
+            .contains("Profile persistence (archive previous data)"));
+        assert_eq!(staged_copies(root.path()), Vec::<PathBuf>::new());
+        assert_eq!(read_valid_data(&path).unwrap().last_workspace_id, "before");
+        assert_eq!(file_count(&backups), backup_count);
+        staged_write::record_success(&path);
+    }
+
+    #[test]
+    fn saves_after_a_refused_rename_back_off_and_stage_nothing_while_they_wait() {
+        let root = profile_commit_fixture();
+        let path = root.path().join("data/profiles.json");
+        write_data_at(&path, root.path(), &saved("before")).unwrap();
+        let refused = || {
+            with_refused_rename("archive previous data", || {
+                write_data_at(&path, root.path(), &saved("after"))
+            })
+        };
+        // Seconds the paused error names; a slow disk may have taken some of the wait already.
+        let next_attempt = |message: &str| -> u64 {
+            let (_, rest) = message
+                .split_once("next attempt in ")
+                .unwrap_or_else(|| panic!("no wait named: {message}"));
+            rest.split(' ').next().unwrap().parse().unwrap()
+        };
+        refused().unwrap_err();
+        // The saves a busy app makes next wait: none of them stages the store or counts a write
+        // (which would make every reader parse the whole file again).
+        let writes = data_writes(&path);
+        for _ in 0..5 {
+            let paused = write_data_at(&path, root.path(), &saved("after")).unwrap_err();
+            let message = paused.to_string();
+            assert!(
+                message.contains("Profile persistence (paused): 1 failed saves in a row"),
+                "{message}"
+            );
+            assert!((1..=5).contains(&next_attempt(&message)), "{message}");
+            assert!(message.contains("archive previous data"), "{message}");
+            assert!(
+                matches!(paused, AppError::Io(ref error) if error.kind() == std::io::ErrorKind::PermissionDenied)
+            );
+        }
+        assert_eq!(data_writes(&path), writes);
+        assert_eq!(staged_copies(root.path()), Vec::<PathBuf>::new());
+        // Each further failure doubles the wait.
+        staged_write::expire_wait(&path);
+        refused().unwrap_err();
+        let message = write_data_at(&path, root.path(), &saved("after"))
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("2 failed saves in a row"), "{message}");
+        assert!((6..=10).contains(&next_attempt(&message)), "{message}");
+        // Once the wait ran out a save tries again, and one that works ends the backoff.
+        staged_write::expire_wait(&path);
+        write_data_at(&path, root.path(), &saved("after")).unwrap();
+        assert_eq!(read_valid_data(&path).unwrap().last_workspace_id, "after");
+        assert_eq!(staged_copies(root.path()), Vec::<PathBuf>::new());
+        assert!(staged_write::paused(&path).is_none());
+        write_data_at(&path, root.path(), &saved("again")).unwrap();
+    }
+
+    /// A real refusal: Windows will not rename a file another handle holds open without
+    /// delete sharing, as it would not rename the file the antivirus guarded.
+    #[cfg(windows)]
+    #[test]
+    fn a_live_file_that_refuses_renames_fails_its_save_without_leaving_garbage() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = profile_commit_fixture();
+        let path = root.path().join("data/profiles.json");
+        write_data_at(&path, root.path(), &saved("before")).unwrap();
+        let backups = root.path().join("Trash/data-backups");
+        let backup_count = file_count(&backups);
+        const FILE_SHARE_READ: u32 = 1;
+        let holder = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&path)
+            .unwrap();
+        let failure = write_data_at(&path, root.path(), &saved("after")).unwrap_err();
+        let message = failure.to_string();
+        assert!(
+            message.contains("Profile persistence (archive previous data)"),
+            "{message}"
+        );
+        assert!(
+            message.contains("os error 32"),
+            "a sharing violation: {message}"
+        );
+        assert!(!message.contains(&root.path().to_string_lossy().to_string()));
+        assert_eq!(staged_copies(root.path()), Vec::<PathBuf>::new());
+        assert_eq!(file_count(&backups), backup_count);
+        assert!(write_data_at(&path, root.path(), &saved("after"))
+            .unwrap_err()
+            .to_string()
+            .contains("(paused)"));
+        drop(holder);
+        assert_eq!(read_valid_data(&path).unwrap().last_workspace_id, "before");
+        staged_write::expire_wait(&path);
+        write_data_at(&path, root.path(), &saved("after")).unwrap();
+        assert_eq!(read_valid_data(&path).unwrap().last_workspace_id, "after");
+        assert_eq!(staged_copies(root.path()), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn the_first_load_sweeps_staged_copies_left_by_failed_saves() {
+        let root = profile_commit_fixture();
+        let path = root.path().join("data/profiles.json");
+        write_data_at(&path, root.path(), &saved("kept")).unwrap();
+        let dir = staged_write::staged_dir(root.path());
+        let left = dir.join("profiles-1-left.tmp");
+        let writing = dir.join("profiles-2-writing.tmp");
+        fs::write(&left, "{").unwrap();
+        fs::write(&writing, "{").unwrap();
+        File::options()
+            .write(true)
+            .open(&left)
+            .unwrap()
+            .set_modified(SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60))
+            .unwrap();
+        let loaded = with_test_file(path, load_or_migrate).unwrap();
+        assert_eq!(loaded.last_workspace_id, "kept");
+        assert!(!left.exists(), "an hour-old staged copy is garbage");
+        assert!(
+            writing.exists(),
+            "a recent one may belong to a save still running"
+        );
     }
 
     #[test]
