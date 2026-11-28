@@ -779,7 +779,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   }
 
   async function launch(parent, workspaceId, agent, route, brief, settings, generation) {
-    // A route its provider refuses (Claude Code on an Antigravity model) fails here, with the
+    // A route its provider refuses (an Antigravity model on any agent but agy) fails here, with the
     // reason, instead of minutes of "quota exhausted" retries. Asked once the launch holds its slot
     // and a parent stop can wait for it; a check that cannot answer lets the launch go ahead.
     // Who serves the model is asked alongside, only when the user turned some providers off: a saved
@@ -1056,6 +1056,8 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
       ...(capabilities.contextLimit ? { context_limit: capabilities.contextLimit } : {}),
     }));
     return { harness: "Claude Code (picked models always run on it)", models: list,
+      // Why CPA's Antigravity models are missing (the workflow's ANTIGRAVITY_HARNESS_NOTE).
+      ...(typeof catalog.withheld === "string" && catalog.withheld ? { not_offered: catalog.withheld.slice(0, 400) } : {}),
       ...(allowed ? { allowed_providers: allowed } : {}),
       ...(entries.length > MAX_MODELS_LISTED ? { more: entries.length - MAX_MODELS_LISTED } : {}), ...(catalog.stale ? { stale: true } : {}) };
   }

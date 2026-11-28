@@ -258,6 +258,9 @@ export function AgentOrchestratorComposerControls({
   const [reload, setReload] = useState(0);
   // The harness strip's name bubble: the hovered or focused logo's name, at that row's height.
   const [tip, setTip] = useState<{ label: string; top: number } | null>(null);
+  // Why some of CPA's models are left out of this harness's list (Antigravity's run only in the agy
+  // chat). Declared after the other state, whose order the composer's tests rely on.
+  const [withheld, setWithheld] = useState("");
   const shown = useRef("");
   // The route as it is now: a catalog that arrives after the user picked another model must not
   // write the route it started with back over that pick.
@@ -267,7 +270,7 @@ export function AgentOrchestratorComposerControls({
     if (mode !== "single") return;
     let live = true;
     const key = `${mode}|${route.harness_id}`;
-    if (shown.current !== key) { shown.current = key; setModels(null); setCaps({}); }
+    if (shown.current !== key) { shown.current = key; setModels(null); setCaps({}); setWithheld(""); }
     setError("");
     const none: AoModelCatalog = { models: [] };
     // Native Codex lists WebGPT and the CPA pool itself; other harnesses add the WebGPT models.
@@ -280,6 +283,7 @@ export function AgentOrchestratorComposerControls({
       setCaps(loaded);
       setGaps({ ...modelGaps(webCatalog), ...modelGaps(catalog) });
       setHeld({ ...modelHeld(webCatalog), ...modelHeld(catalog) });
+      setWithheld(Array.isArray(catalog) ? "" : catalog.withheld ?? "");
       rememberCpaProviders(loaded);
       const current = latest.current;
       if (current.harness_id !== route.harness_id || current.model !== route.model) return;
@@ -452,6 +456,7 @@ export function AgentOrchestratorComposerControls({
               })}
             </div>)}
             {models !== null && !matching.length ? <p role="status">{error || "No matching models."}</p> : null}
+            {models !== null && withheld ? <p className="ao-hint ao-model-note" role="note">{withheld}.</p> : null}
           </div>
         </>}
       </ChipMenu>

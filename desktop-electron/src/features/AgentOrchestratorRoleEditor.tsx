@@ -24,8 +24,26 @@ export type AoModelCapabilities = {
 /** `held`: listed models CPA is not listing right now (kept from memory), with why; they still run.
  *  `stale`: CPA could not be read, so the list is the remembered one. */
 /** `scores`: each model's points from finished Team rounds (model-scores.ts), for the picker's badges. */
+/** `withheld`: why some of CPA's models are left out of this harness's list (Antigravity's run only in
+ *  the agy chat); each one is also in `unavailable` with that reason. */
 export type AoModelCatalog = { models: string[]; capabilities?: Record<string, AoModelCapabilities>; unavailable?: Record<string, string>;
-  held?: Record<string, string>; stale?: boolean; scores?: Record<string, ModelScoreHint> };
+  held?: Record<string, string>; stale?: boolean; scores?: Record<string, ModelScoreHint>; withheld?: string };
+/**
+ * A model loader's answer as the pickers keep it: the plain id list, or the catalog with only the
+ * fields they read (capabilities, the unavailable and held notes, `withheld`, and stale).
+ */
+export function catalogFromResult(result: Record<string, unknown>): string[] | AoModelCatalog {
+  const models = Array.isArray(result.models) ? result.models as string[] : [];
+  function record<T>(value: unknown): Record<string, T> | undefined {
+    return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, T> : undefined;
+  }
+  const capabilities = record<AoModelCapabilities>(result.capabilities);
+  const unavailable = record<string>(result.unavailable), held = record<string>(result.held);
+  const withheld = typeof result.withheld === "string" && result.withheld ? result.withheld : undefined;
+  return capabilities || unavailable || held || withheld ? { models, ...(capabilities ? { capabilities } : {}),
+    ...(unavailable ? { unavailable } : {}), ...(held ? { held } : {}), ...(withheld ? { withheld } : {}),
+    ...(result.stale === true ? { stale: true } : {}) } : models;
+}
 export type AoModelLoader = (harness: string) => Promise<string[] | AoModelCatalog>;
 export const emptyRoleSettings = (): RoleSettings => ({ name: "", specialty: "", instructions: "", expected_output: "", working_directory: "", revision: 0 });
 
@@ -528,8 +546,13 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
   const baseModel = route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
   const capability = listed?.[route.model] ?? listed?.[baseModel];
   const scores = Object.assign({}, ...(catalogs ?? []).map(item => item.catalog.scores ?? {})) as Record<string, ModelScoreHint>;
-  // A saved model the card's agent no longer lists: say so, and offer the same model elsewhere.
-  const missing = !native && Boolean(own?.models.length) && Boolean(route.model) && route.model !== AGENT_DEFAULT_MODEL && !own!.models.includes(route.model) && !own!.models.includes(baseModel);
+  // A saved model the card's agent no longer lists: say so, and why when the agent says, and offer
+  // the same model elsewhere.
+  const missing = Boolean(own?.models.length) && Boolean(route.model) && route.model !== AGENT_DEFAULT_MODEL && !own!.models.includes(route.model) && !own!.models.includes(baseModel)
+    && (!native || Boolean(own?.unavailable?.[route.model] ?? own?.unavailable?.[baseModel]));
+  const missingWhy = missing ? own?.unavailable?.[route.model] ?? own?.unavailable?.[baseModel] : undefined;
+  // Why some of CPA's models are not in the list at all (Antigravity's run only in the agy chat), once.
+  const withheld = [...new Set((catalogs ?? []).map(item => item.catalog.withheld).filter((note): note is string => Boolean(note)))];
   const { efforts, nativeMax, context, fullLimit, presets, fixed } = routeTuning(route, capability);
   const webEffort = native && isWebModel(route.model);
   const pick = (model: string, agent?: string) => {
@@ -630,8 +653,9 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
         })}
       </div>)}
       {choices !== null && !groups.size ? <p className="ao-route-empty" role="status">No models</p> : null}
+      {withheld.map(note => <p key={note} className="ao-route-empty ao-route-note" role="note">{note}.</p>)}
     </div> : null}
-    {missing ? <p className="ao-hint" role="status">Not on this agent.
+    {missing ? <p className="ao-hint" role="status">{missingWhy ? `Not on this agent: ${missingWhy}.` : "Not on this agent."}
       {sameModelElsewhere(route.model, own?.models ?? []).map(other => <button key={other} type="button" className="button-secondary ao-score-pick" disabled={disabled}
         onClick={() => pick(other, harness)}>Use {modelLabel(other)}</button>)}</p> : null}
     {notice ? <p className="ao-hint" role="status">{notice}</p> : null}

@@ -812,6 +812,49 @@ test("a subagent on a route its provider refuses fails at once with the reason, 
   } finally { w.cleanup(); }
 });
 
+test("a subagent saved on an Antigravity model fails at launch with the workflow's reason, and the model list says why it is missing", async () => {
+  // The user's choice (2026-11-29): Antigravity's models run only in the agy chat. Wired as main.cjs
+  // wires it: the workflow's own catalog, refusal and launch arguments.
+  const catalog = { data: [{ id: "test-model", owned_by: "antigravity" }, { id: "glm-5", owned_by: "zai" }] };
+  const workflow = createAgentOrchestratorWorkflow({
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async url => String(url).includes("/v1/models") ? { ok: true, json: async () => catalog } : { ok: false, status: 404, json: async () => ({}) },
+    requestHeadless: async () => ({ ok: true, runs: [], teams: [] }),
+    aoHarness: { catalog: async () => [], models: async () => [], spawn: async () => "session" },
+  });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-agy-"));
+  const spawned = [];
+  const service = createSubagents({
+    statePath: path.join(dir, "subagents.json"),
+    launchArgs: (workspaceId, route, name) => workflow.subagentLaunchArgs(workspaceId, route, name),
+    harness: () => ({ spawn: async (input) => { spawned.push(input); return "sub-1"; }, observe: async () => ({ turnState: "queued", approvals: [] }) }),
+    blockedRequest: workflow.blockedRequest, recommendedAnswer: workflow.recommendedAnswer,
+    routeRefusal: (route) => workflow.subagentRouteRefusal(route),
+    models: (workspaceId, harness = "ao:claude-code") => workflow.call("models", { harness, workspaceId }),
+    logger: { info() {}, warn() {} },
+  });
+  try {
+    await service.save({ settings: { defaultRoute: ROUTE }, agents: STARTERS });
+    const refused = await service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Map the training data" });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /"Explorer" cannot run on its model: test-model is served by Antigravity\. Antigravity models run only in the agy chat \(the Antigravity harness, on its own Google sign-in\): Google refuses them from other agent harnesses \(it reports "quota exhausted"\) and can suspend the accounts\. The user can give it another model on the Subagents page/);
+    // A model the chat agent picks is refused the same way, before anything starts.
+    const picked = await service.call("chat-1", "ws-1", "subagent_start", { task: "Read", model: "test-model" });
+    assert.equal(picked.isError, true);
+    assert.match(picked.content[0].text, /test-model is not offered to Claude Code \(Antigravity models run only in the agy chat/);
+    assert.deepEqual(spawned, [], "no AO session is started");
+    const listed = parse(await service.call("chat-1", "ws-1", "subagent_models", {}));
+    assert.deepEqual(listed.models.map(model => model.id), ["glm-5"]);
+    assert.match(listed.not_offered, /^Antigravity models run only in the agy chat/);
+    // Another provider's model still starts.
+    assert.equal((await service.call("chat-1", "ws-1", "subagent_start", { task: "Read", model: "glm-5" })).isError, false);
+    assert.equal(spawned.length, 1);
+  } finally {
+    service.dispose();
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  }
+});
+
 // Claude Code's catalog as the workflow's models({ harness: "ao:claude-code" }) returns it.
 const CATALOG = {
   ok: true, harness: "ao:claude-code", models: ["cpa/glm-5", "cpa/fixed-model"],

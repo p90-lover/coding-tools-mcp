@@ -104,6 +104,8 @@
 .sa-agent > .sa-model .sa-select:not(.is-provider):not(.is-effort) { flex: 1 1 220px; }
 /* A subagent on the default model shows only the provider field, which then reads the default. */
 .sa-agent > .sa-model .sa-select.is-provider:only-child { flex: 1 1 260px; }
+/* Why a saved model is not offered (an Antigravity model runs only in the agy chat), under its fields. */
+.sa-model .sa-model-why { flex: 1 0 100%; margin: 0; }
 .subagents-page .sa-text { width: 100%; box-sizing: border-box; padding: 9px 10px; border: 1px solid var(--sa-line); border-radius: 8px; background: var(--sa-field); color: var(--sa-text); font: inherit; font-size: 13px; line-height: 1.5; resize: vertical; }
 .sa-text::placeholder { color: var(--sa-text-3); }
 .sa-label { display: grid; gap: 4px; min-width: 0; color: var(--sa-text-2); font-size: 11.5px; font-weight: 500; }

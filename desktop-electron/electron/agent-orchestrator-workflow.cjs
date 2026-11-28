@@ -223,10 +223,32 @@ const fullAccessOnly = (agent) => `${FULL_ACCESS_REASONS[agent]
 // own models are listed beside CPA's once it is signed in on the Antigravity page; until then its
 // catalog is empty (see models()), never an error that would hide CPA's.
 const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
-// Antigravity's models (Gemini and Claude) are offered to Claude Code like every other CPA model,
-// by the user's choice (2026-11-08). They were hidden from it from 2026-10-22: Antigravity refused
-// requests carrying Claude Code's Agent SDK identity line with "quota exhausted"; rechecked
-// 2026-10-30, the line passed again, only slower while CPA skipped accounts that refused.
+// CPA's Antigravity models (its Gemini, Claude and GPT-OSS ones) are offered to no agent harness
+// but agy, by the user's choice (2026-11-29, "use agy safely"). Google refuses them from agent
+// harnesses and reports it as quota: in Coding Agent, 58 harness requests on gemini-4-argon-high
+// all came back 429 RESOURCE_EXHAUSTED "check quota" on two accounts, while the same model answered
+// a tiny request and a ~120k-character neutral one. Google has also said that proxying Antigravity
+// sign-ins or wrapping it in a third-party agent loop can get the accounts suspended, so requests
+// are not disguised to get past it (CPA's prompt rewrite is not extended for this). agy runs them
+// on its own Google sign-in; the app's own direct CPA calls (the command reviewer, goal checks, chat
+// names), which send plain prompts of their own, keep them. History: hidden from Claude Code
+// 2026-10-22, offered to every harness again 2026-11-08.
+const ANTIGRAVITY_HARNESS_NOTE = "Antigravity models run only in the agy chat (the Antigravity harness, on its own Google sign-in): "
+  + "Google refuses them from other agent harnesses (it reports \"quota exhausted\") and can suspend the accounts";
+/** Whether a CPA model's capability names Antigravity as the upstream that serves it. */
+const antigravityServed = (capability) => /antigravity/i.test(String(capability?.provider ?? ""));
+/** Whether `agent` (an AO agent id, or "codex-native") is kept off the CPA model `capability` describes. */
+const antigravityRefused = (agent, capability) => agent !== "agy" && antigravityServed(capability);
+/** The refusal of an Antigravity model on another harness, said so a person can act on it. */
+const antigravityRefusal = (model, who = "", fix = "Choose another model") =>
+  `${who ? `${who}: ` : ""}${model} can't run on this harness. ${ANTIGRAVITY_HARNESS_NOTE}. ${fix}.`;
+/** The CPA models `refused(id)` keeps off a harness, each with the reason, or null when there is none. */
+function withheldNotes(catalog, refused) {
+  const ids = (catalog?.models ?? []).filter(id => !id.startsWith("chatgpt-web/") && refused(id));
+  return ids.length ? Object.fromEntries(ids.map(id => [id, ANTIGRAVITY_HARNESS_NOTE])) : null;
+}
+/** `notes` (model -> why) without the models `drop` has. */
+const withoutKeys = (notes, drop) => notes ? Object.fromEntries(Object.entries(notes).filter(([id]) => !Object.hasOwn(drop, id))) : notes;
 const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model) || NAMED_WEB_MODELS.includes(model);
 const EFFORT_RANK = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 /**
@@ -385,7 +407,7 @@ function refusedReason(error) {
 // One distinctive phrase of each refusal aoLaunchArgs throws, not "Launch failed:" as a whole: a
 // launch that timed out is what "Retry automatically" is for.
 // "Antigravity asks for approval in its own terminal" is how a card saved before 0.8.137 says it.
-const ROUTE_REFUSED = /cannot honor the saved permission tuple|can't use the CPA model|Choose Full access, the only mode it runs in|Antigravity asks for approval in its own terminal|Choose a supported CPA reasoning level/i;
+const ROUTE_REFUSED = /cannot honor the saved permission tuple|can't use the CPA model|Choose Full access, the only mode it runs in|Antigravity asks for approval in its own terminal|Choose a supported CPA reasoning level|Antigravity models run only in the agy chat/i;
 /**
  * AO could not run the agent's program at all: its version probe failed ("chat driver incompatible:
  * read Codex version: exit status 1", CHAT_DRIVER_INCOMPATIBLE). The program is missing, broken or
@@ -817,6 +839,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // could only print its tool calls as text. agy picks its own thinking level.
     const verbatim = Boolean(viaCpa) && (agent === "agy" || verbatimModel(viaCpa));
     const baseModel = viaCpa?.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+    // An Antigravity model on any agent but agy is refused before AO starts anything (ROUTE_REFUSED,
+    // so no automatic retry), judged from what CPA last reported serving it. The send's check
+    // (antigravityRouteModel) reads CPA's list first; this catches a launch that skipped it.
+    if (viaCpa && antigravityRefused(agent, knownModels[baseModel]?.capability)) {
+      throw new Error(antigravityRefusal(baseModel, node.settings?.name || "This card"));
+    }
     // A model saved with a level in its name ("…(high)", an older chat) is that effort unless one is picked.
     const savedLevel = viaCpa?.match(/\((none|minimal|low|medium|high|xhigh|max|ultra)\)$/i)?.[1]?.toLowerCase();
     if (!effort && savedLevel && node.route.effort !== "auto") effort = savedLevel;
@@ -1879,23 +1907,33 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         const cpaLimit = catalog?.capabilities[item.id]?.contextLimit;
         return [item.id, modelCapabilities(agent, item.id, item.contextLimit || !cpaLimit ? item : { ...item, contextLimit: cpaLimit })];
       }));
-      const cpa = !catalog ? [] : catalog.models.filter(id => !id.startsWith("chatgpt-web/")).map(id => {
+      // Antigravity's models are not offered to any agent but agy (ANTIGRAVITY_HARNESS_NOTE): each is
+      // marked unavailable with the reason, and `withheld` gives the pickers the note once.
+      const refused = id => antigravityRefused(agent, catalog?.capabilities[id]);
+      const cpa = !catalog ? [] : catalog.models.filter(id => !id.startsWith("chatgpt-web/") && !refused(id)).map(id => {
         const routed = `${CPA_MODEL_PREFIX}${id}`;
         capabilities[routed] = modelCapabilities(agent, id, catalog.capabilities[id], true);
         return routed;
       });
-      const routedNotes = notes => notes ? Object.fromEntries(Object.entries(notes).map(([id, why]) => [`${CPA_MODEL_PREFIX}${id}`, why])) : null;
-      const unavailable = routedNotes(catalog?.unavailable);
-      const held = routedNotes(catalog?.held);
+      const routedNotes = notes => notes && Object.keys(notes).length
+        ? Object.fromEntries(Object.entries(notes).map(([id, why]) => [`${CPA_MODEL_PREFIX}${id}`, why])) : null;
+      const withheld = withheldNotes(catalog, refused);
+      const unavailable = routedNotes(withheld ? { ...catalog?.unavailable, ...withheld } : catalog?.unavailable);
+      const held = routedNotes(withheld ? withoutKeys(catalog?.held, withheld) : catalog?.held);
       return { ok: true, harness, models: [...new Set([...items.map(item => item.id), ...cpa])], capabilities,
-        ...(unavailable ? { unavailable } : {}), ...(held ? { held } : {}), ...(catalog?.stale ? { stale: true } : {}) };
+        ...(unavailable ? { unavailable } : {}), ...(held ? { held } : {}), ...(withheld ? { withheld: ANTIGRAVITY_HARNESS_NOTE } : {}),
+        ...(catalog?.stale ? { stale: true } : {}) };
     }
     if (harness === "codex-native") {
-      // Native Codex runs WebGPT through the bridge and every CPA model through the shared pool.
+      // Native Codex runs WebGPT through the bridge and every CPA model through the shared pool, but
+      // Antigravity's: Codex's agent loop is a third-party harness too (ANTIGRAVITY_HARNESS_NOTE).
       // Without CPA it still offers WebGPT.
       let pool = { models: [], capabilities: {} };
       try { pool = await models(); } catch {}
-      const cpa = pool.models.filter(id => !id.startsWith("chatgpt-web/"));
+      const refused = id => antigravityRefused(harness, pool.capabilities?.[id]);
+      const cpa = pool.models.filter(id => !id.startsWith("chatgpt-web/") && !refused(id));
+      const withheld = withheldNotes(pool, refused);
+      const held = withheld ? withoutKeys(pool.held, withheld) : pool.held;
       const web = await webWindow();
       // Only ChatGPT's own effort tiers are offered. Luna and Think exist only on Free/Go accounts
       // without the effort picker, and there the bridge already runs these tiers as Luna (Instant,
@@ -1903,7 +1941,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       return { ok: true, harness, models: [...WEB_TIERS, ...cpa],
         capabilities: Object.fromEntries([...(web ? WEB_TIERS.map(id => [id, web]) : []),
           ...cpa.map(id => [id, pool.capabilities[id]]).filter(([, value]) => value)]),
-        ...(pool.held ? { held: pool.held } : {}), ...(pool.stale ? { stale: true } : {}) };
+        ...(held && Object.keys(held).length ? { held } : {}),
+        ...(withheld ? { unavailable: withheld, withheld: ANTIGRAVITY_HARNESS_NOTE } : {}), ...(pool.stale ? { stale: true } : {}) };
     }
     return cachedCpaCatalog();
   }
@@ -2993,6 +3032,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
    * fix. An unreadable catalog never blocks a send; the launch check stays the backstop.
    */
   async function unlistedModel(workspaceId, route, who = "") {
+    // An Antigravity model on another harness is refused as the send starts, with the reason.
+    const refused = await antigravityRouteModel(route);
+    if (refused) return antigravityRefusal(refused, who,
+      who ? "Choose another model for it in Team settings, then send again" : "Choose another model, or move this chat to Antigravity, then send again");
     if (!route?.model || !String(route.harness_id || "").startsWith("ao:")) return null;
     const base = route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
     // A CPA model is judged by CPA's own list: an agent's catalog falls back to the agent's models
@@ -3012,6 +3055,28 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const why = (viaCpa ? catalog.unavailable?.[base.slice(CPA_MODEL_PREFIX.length)] ?? catalog.unavailable?.[route.model.slice(CPA_MODEL_PREFIX.length)] : null);
     if (why) return `${who ? who + ": " : ""}${route.model.replace(/^cpa\//, "")} is not offered right now: ${why}${who ? " in Team settings" : ""}, then send again.`;
     return `${who ? who + ": " : ""}${route.model.replace(/^cpa\//, "")} is not offered right now. It was renamed, or no account is signed in for it. Choose another model${who ? " in Team settings" : ""}, then send again.`;
+  }
+  /**
+   * The CPA model `route` would run that its harness is kept off, or null: one Antigravity serves, on
+   * any harness but agy (ANTIGRAVITY_HARNESS_NOTE), an AO agent's "cpa/<model>" or Native Codex's
+   * pool model alike. Judged from CPA's own list (the launch catalog, served stale while it
+   * revalidates), else from what CPA last reported; a model neither names lets the launch go ahead,
+   * so the launch's own check (aoLaunchArgs) stays the backstop.
+   */
+  async function antigravityRouteModel(route) {
+    const harness = String(route?.harness_id ?? "");
+    const agent = harness === "codex-native" ? harness : harness.startsWith("ao:") ? harness.slice(3) : null;
+    const model = String(route?.model ?? "");
+    if (!agent || agent === "agy" || !model) return null;
+    // Native Codex names a pool model bare (workerRoute); an AO agent as "cpa/<model>".
+    const id = agent === "codex-native"
+      ? (route.provider_id === "cliproxyapi-antigravity" && !webModel(model) ? model : null)
+      : (model.startsWith(CPA_MODEL_PREFIX) ? model.slice(CPA_MODEL_PREFIX.length) : null);
+    if (!id) return null;
+    const base = id.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+    const catalog = await launchModels({}).catch(() => null);
+    const capability = catalog?.capabilities?.[id] ?? catalog?.capabilities?.[base] ?? knownModels[base]?.capability;
+    return antigravityRefused(agent, capability) ? base : null;
   }
   function missingModelNotice(team) {
     const invalid = Array.isArray(team?.nodes) ? team.nodes.find(node => !node.route?.model || node.route.model === "default") : null;
@@ -3551,6 +3616,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }
       const catalog = await models();
       if (!catalog.models.includes(route.model)) throw new Error("Exact AO worker model is absent from CPA catalog");
+      // Codex's agent loop is a harness Google refuses Antigravity's models from (ANTIGRAVITY_HARNESS_NOTE).
+      if (antigravityRefused("codex-native", catalog.capabilities?.[route.model])) {
+        throw new Error(antigravityRefusal(route.model, node.settings?.name || "This card"));
+      }
     } else if (!["planner", "approver", "worker", "review_split", "sub_reviewer", "reviewer"].includes(node.role)
       || route.harness_id !== "codex-native" || route.provider_id !== "chatgpt-web"
       || !webModel(route.model)) {
@@ -11523,6 +11592,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       { id: "subagent", role: "worker", route, settings: { name } }, true, windowed ? windowLimit(route) : null);
   };
   /**
+   * Why a subagent cannot run on `route`, or null; subagents.cjs asks before it launches, so a
+   * subagent saved on an Antigravity model fails with the reason before any AO session starts.
+   */
+  const subagentRouteRefusal = async (route) => {
+    const model = await antigravityRouteModel(route);
+    return model ? `${model} is served by Antigravity. ${ANTIGRAVITY_HARNESS_NOTE}` : null;
+  };
+  /**
    * A saved team run as a subagent (subagents.cjs): the team works on the task as a chat of its own
    * (chat_send in team mode, started in the background as a /goal round is), and its closing cards'
    * answers are the report. Only teams whose every role has a model are offered.
@@ -11594,7 +11671,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /** Resolves once every deleted-message, archive and unsent-draft change so far is on disk (saved off the main thread too). */
   const chatEditsSaved = () => Promise.all([chatEdits.saved(), archive.saved(), chatDrafts.saved()]);
   return Object.freeze({ call, configureChatAutobot, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals,
-    startAutonomousTurnWatch, adoptAutonomousTurns, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, sshRequest, readOnlyInspection, nativeCommandReview, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, screenSshExec, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
+    startAutonomousTurnWatch, adoptAutonomousTurns, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, sshRequest, readOnlyInspection, nativeCommandReview, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, screenSshExec, recommendedAnswer, subagentLaunchArgs, subagentRouteRefusal, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, agentApiError, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, FALLBACK_JUDGE_ALLOWS, fallbackJudgeAllows, fallbackJudgeRule, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

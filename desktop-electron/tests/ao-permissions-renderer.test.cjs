@@ -111,6 +111,26 @@ test("model search filters real catalog choices and WebGPT selection preserves s
   assert.equal(routes[0].approvals_reviewer, "auto_review");
 });
 
+test("a harness that leaves Antigravity's models out says why in its model menu, and on a chat saved on one", async () => {
+  const note = "Antigravity models run only in the agy chat (the Antigravity harness, on its own Google sign-in): Google refuses them from other agent harnesses (it reports \"quota exhausted\") and can suspend the accounts";
+  const view = renderer("AgentOrchestratorComposerControls.tsx");
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gemini-3.8-flash-high", permission_profile: ":ao-default" };
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange() {}, harnesses: [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false,
+    loadModels: async harness => harness === "codex-native" ? ["chatgpt-web/high"]
+      : { models: ["cpa/claude-haiku-4-5"], unavailable: { "cpa/gemini-3.8-flash-high": note }, withheld: note } };
+  view.render("AgentOrchestratorComposerControls", props, composerState(null));
+  view.effects[view.effects.length - 1]();
+  await new Promise(resolve => setImmediate(resolve));
+  const tree = view.render("AgentOrchestratorComposerControls", props);
+  const model = menuNamed(tree, "Model");
+  assert.ok(model.props.title.endsWith(` is not offered right now: ${note}`), `the saved pick says why it won't run: ${model.props.title}`);
+  assert.match(text(model.props.label), /not available/);
+  const shown = elements(model.props.children(() => {}), item => item.props?.role === "note");
+  assert.equal(shown.length, 1);
+  assert.equal(text(shown[0]), `${note}.`, "the menu says once why those models are missing");
+  assert.deepEqual(optionsIn(model).map(option => option.props.title.split("\n")[1]), ["cpa/claude-haiku-4-5", "chatgpt-web/high"]);
+});
+
 test("WebGPT locks the harness; its model menu offers Native Codex's CPA models, which keep the native permission", async () => {
   const view = renderer("AgentOrchestratorComposerControls.tsx");
   const calls = [], routes = [];

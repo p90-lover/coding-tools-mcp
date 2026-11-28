@@ -5243,6 +5243,8 @@ async function start() {
         harness: () => agentOrchestratorUpstream?.harness ?? null,
         blockedRequest: (text) => missionWorkflowRuntime?.blockedRequest?.(text) ?? true,
         recommendedAnswer: (approval) => missionWorkflowRuntime?.recommendedAnswer?.(approval) ?? { action: "decline" },
+        // A subagent on an Antigravity model fails at launch with the reason (agy runs those alone).
+        routeRefusal: (route) => missionWorkflowRuntime?.subagentRouteRefusal?.(route) ?? null,
         // A model the chat agent picks runs on Claude Code (or Codex for its own-account models)
         // and is checked against that agent's catalog; a saved team can run as one subagent.
         models: (workspaceId, harness = "ao:claude-code") => missionWorkflowRuntime?.call("models", { harness, workspaceId }) ?? null,
