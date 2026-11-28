@@ -65,6 +65,9 @@ function setup(options = {}) {
     absent: output => /not found/.test(output),
     onChange: status => changes.push(status),
     timing: FAST,
+    // The fake inventory's pid (4242) is checked with these, never against the machine's processes.
+    alive: options.alive ?? (() => false),
+    now: options.now,
   });
   return { coreHome, config, client, tunnels, changes };
 }
@@ -291,6 +294,32 @@ test("the monitor restarts a tunnel that lost readiness, and gives up after repe
   assert.match(tunnels.status()[0].detail, /reconnect it to try again/);
   await tunnels.reconnect(added.id);
   assert.equal(tunnels.status()[0].state, "ready");
+  tunnels.detach();
+});
+
+test("while every tunnel is ready and its process runs, the monitor starts tunnel-client every 5 minutes, not every 10 s", async () => {
+  // 2026-11-27: the inventory ran every 10 s for as long as the app did (7,000 starts in 19 h), and
+  // Bitdefender's behaviour monitor quarantined the app with that among what it scored.
+  let clock = 1_000_000;
+  const alive = new Set([4242]);
+  const { config, client, tunnels } = setup({ alive: pid => alive.has(pid), now: () => clock });
+  await tunnels.start(config);
+  const added = await tunnels.add({ label: "Team", tunnelId: SECOND_ID, runtimeKey: "sk" });
+  const inventories = () => client.calls.filter(call => call.args[1] === "cleanup").length;
+  const pass = async () => { clock += 10_000; await tunnels.check(); await tunnels.queue; };
+  await pass();
+  const first = inventories();
+  for (let tick = 0; tick < 25; tick += 1) await pass();
+  assert.equal(inventories(), first, "ready with its process running: four minutes of passes start nothing");
+  for (let tick = 0; tick < 6; tick += 1) await pass();
+  assert.equal(inventories(), first + 1, "the five-minute inventory");
+  // Its process gone: the very next pass takes the inventory, and the usual restart follows.
+  alive.delete(4242);
+  client.runtimes.set(aliasOf(added.id), "stopped");
+  await pass();
+  assert.equal(inventories(), first + 2, "the pass right after its process went");
+  await pass();
+  assert.equal(client.runtimes.get(aliasOf(added.id)), "ready", "restarted after two failed passes, as before");
   tunnels.detach();
 });
 

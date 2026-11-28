@@ -174,6 +174,24 @@ test("Register keeps its Connections destination and native overlay visibility g
   assert.equal((i18nSource.match(/register: /g) || []).length, 4);
 });
 
+// Connections > SSH hosts (2026-11-26): the servers the person approves for SSH. It is the last
+// Connections entry, right after Workspace auth, kept mounted like its neighbours and not under More.
+test("SSH hosts is the last Connections entry, after Workspace auth, and its page stays mounted", () => {
+  const connections = appSource.slice(appSource.indexOf("<SidebarGroup label={copy.connections}>"), appSource.indexOf('<section className={`sidebar-more'));
+  assert.match(connections, /<SidebarItem active=\{surface === "workspace-auth"\}[^\n]*navigateSurface\("workspace-auth"\)\} \/>\s*<SidebarItem active=\{surface === "ssh-connections"\} icon="terminal" label="SSH hosts" onClick=\{\(\) => navigateSurface\("ssh-connections"\)\} \/>\s*<\/SidebarGroup>/);
+  assert.equal((connections.match(/<SidebarItem /g) || []).length, 5, "App plugins, Accounts, Register, Workspace auth, SSH hosts");
+  assert.equal((appSource.match(/navigateSurface\("ssh-connections"\)/g) || []).length, 1, "one way in: the sidebar entry");
+  assert.match(fs.readFileSync(path.join(launcherRoot, "src", "icons.tsx"), "utf8"), /\| "terminal"/, "an icon the app already draws");
+  assert.match(appSource, /import \{ SshConnectionsSurface \} from "\.\/features\/SshConnectionsSurface";/);
+  // The page reads its list only while it is on screen, so it is told when it is.
+  assert.match(appSource, /\{keepAlive\("ssh-connections", \(\) => \(\s*<SshConnectionsSurface active=\{surface === "ssh-connections"\} setError=\{setError\} \/>\s*\)\)\}/);
+  const moreStart = appSource.indexOf("const moreSurfaces = [");
+  assert.doesNotMatch(appSource.slice(moreStart, appSource.indexOf("] as const;", moreStart)), /ssh-connections/);
+  assert.match(typesSource, /type Surface[^;]*"workspace-auth" \| "ssh-connections"/);
+  const actionTimes = fs.readFileSync(path.join(launcherRoot, "src", "features", "ActionTimesPanel.tsx"), "utf8");
+  assert.match(actionTimes, /"workspace-auth": copy\.workspaceAuth,\s*"ssh-connections": "SSH hosts",/, "Activity names the tab as the sidebar does");
+});
+
 test("the sidebar's More section has a pin on its heading's right that keeps it open", () => {
   const more = appSource.slice(appSource.indexOf('<section className={`sidebar-more'), appSource.indexOf("</nav>"));
   // Open while one of its pages shows, or always once pinned; the pin is saved with the sidebar state.
@@ -404,7 +422,7 @@ test("Register native page detaches for launcher reload and crash without stoppi
   const file = ts.createSourceFile("main.cjs", electronMain, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   const functions = file.statements.filter(ts.isFunctionDeclaration);
   const sourceOf = (name) => functions.find((node) => node.name?.text === name).getText(file);
-  const callbacks = new Map(), calls = [], recovered = [];
+  const callbacks = new Map(), calls = [], recovered = [], sshCloses = [];
   const collect = (node) => {
     if (ts.isCallExpression(node) && node.expression.getText(file) === "window.webContents.on"
       && ["did-start-navigation", "render-process-gone"].includes(node.arguments[0]?.text)) {
@@ -419,6 +437,8 @@ test("Register native page detaches for launcher reload and crash without stoppi
     logger: { warn() {} }, quitting: false, rendererCrashes: [], setTimeout() {},
     // The crash path and renderer-watchdog.cjs share one recovery (reload, or restart after three).
     recoverRenderer: (reason) => recovered.push(reason),
+    // The SSH hosts page's terminal goes with its page (ssh-connections.test.cjs tests the rest).
+    sshConnectionsService: { closeAll: async (reason) => { sshCloses.push(reason); } },
   };
   const load = vm.runInNewContext("(" + sourceOf("loadRenderer") + ")", scope);
   await load(window);
@@ -447,6 +467,8 @@ test("Register native page detaches for launcher reload and crash without stoppi
   assert.deepEqual(recovered, ["gone"], "and the page is recovered");
   crashed({}, { reason: "clean-exit", exitCode: 0 });
   assert.deepEqual(recovered, ["gone"], "a renderer that closed cleanly is not reloaded");
+  // The SSH hosts page's terminal: closed on the main-document navigation and on each renderer loss, never on an SPA route change.
+  assert.deepEqual(sshCloses, ["navigation", "renderer_gone", "renderer_gone"]);
 });
 
 test("In-Process Apps shows only CPA/AO and refuses a stale retired selection", async () => {

@@ -7,6 +7,9 @@ const MODULE_IDS = Object.freeze([
   "cpa",
   "agent-orchestrator",
   "antigravity-cli",
+  // The person's SSH hosts. The app window calls it; agent-facing tools never do
+  // (desktop-electron/electron/coding-tools-apps-mcp.cjs leaves it out).
+  "ssh-connections",
 ]);
 
 const RETIRED_MODULE_IDS = new Set(["paseo", "codex-router", "commandcode-proxy", "anneal"]);

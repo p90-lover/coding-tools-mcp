@@ -14,12 +14,13 @@ async function callUpstream(operation: string, args: JsonObject = {}) {
 
 const STATE_LABEL: Record<string, string> = { ready: "Connected", starting: "Starting", stopping: "Stopping", stopped: "Stopped", error: "Not connected" };
 
+/** `remote`: an SSH session, shown in AO's remote mode (no links, pastes without control characters). */
+export type AoTerminalView = { handle: string; generation: string; title: string; remote?: boolean };
+
 /**
  * Hosts the source-built AO renderer in a native view sized to this element.
  * `hostbar={false}` is used inside Runtime, whose own toolbar already switches views.
  */
-export type AoTerminalView = { handle: string; generation: string; title: string };
-
 export function AgentOrchestratorOriginalSurface({ openMissions, projectBoard = false, workspaceId, hostbar = true, terminal }: {
   openMissions: () => void; projectBoard?: boolean; workspaceId?: string; hostbar?: boolean;
   /** Show one AO terminal (e.g. the Antigravity CLI) instead of the AO app. */
@@ -53,7 +54,8 @@ export function AgentOrchestratorOriginalSurface({ openMissions, projectBoard = 
     };
     setError(""); setState("starting");
     void callUpstream("upstream_show", { bounds: bounds(), projectBoard, ...(workspaceId ? { workspaceId } : {}),
-      ...(terminal ? { terminal: { handle: terminal.handle, generation: terminal.generation, title: terminal.title } } : {}) }).then(() => {
+      ...(terminal ? { terminal: { handle: terminal.handle, generation: terminal.generation, title: terminal.title,
+        ...(terminal.remote === true ? { remote: true } : {}) } } : {}) }).then(() => {
       if (disposed) return;
       ready = true; setState("ready"); resize();
     }).catch((cause) => { if (!disposed) { setState("error"); setError(String(cause.message || cause)); } });
@@ -75,7 +77,7 @@ export function AgentOrchestratorOriginalSurface({ openMissions, projectBoard = 
       observer.disconnect(); window.removeEventListener("resize", resize);
       void callUpstream("upstream_hide").catch(() => undefined);
     };
-  }, [covered, generation, projectBoard, workspaceId, terminal?.handle, terminal?.generation, terminal?.title]);
+  }, [covered, generation, projectBoard, workspaceId, terminal?.handle, terminal?.generation, terminal?.title, terminal?.remote]);
 
   const reconnect = () => setGeneration((value) => value + 1);
   return (

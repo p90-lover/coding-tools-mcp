@@ -2,7 +2,7 @@ export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
 export type RefreshPart = "ui" | "bridge" | "mcp" | "agent-orchestrator" | "cpa" | "headless" | "backend" | "all" | "app";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "chatgpt-browser-management" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "computer-use" | "app-layout" | "rtk" | "plugins" | "antigravity-cli" | "providers" | "integrations" | "app-plugins" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
+export type Surface = "browser" | "chatgpt-browser-management" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "ssh-connections" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "computer-use" | "app-layout" | "rtk" | "plugins" | "antigravity-cli" | "providers" | "integrations" | "app-plugins" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
 
 export interface AppLayoutCategoryItem {
   id: string;

@@ -141,6 +141,16 @@ const DEFAULT_APP_LAYOUT = Object.freeze({
           ],
         },
         {
+          id: "ssh-hosts",
+          title: "SSH Hosts (ssh-connections)",
+          surfaceId: "ssh-connections",
+          summary: "The SSH hosts you approve for chat agents, each with a host key you confirmed.",
+          bullets: [
+            "Add a host by label, host, port and user; agents can use it only after you confirm its key fingerprint",
+            "States: Key not confirmed, Approved, Key changed (blocked); a Production host waits for you on every agent command",
+          ],
+        },
+        {
           id: "rtk-compactor",
           title: "RTK — Token Compactor (rtk)",
           surfaceId: "rtk",
@@ -346,12 +356,13 @@ const DEFAULT_APP_LAYOUT = Object.freeze({
           title: "Agent Capabilities, MCP Servers & Folder Scopes",
           surfaceId: "plugins",
           controllingSwitch: "chatAgentTools",
-          currentLocation: "Configuration › Plugins / Workspace + Connections › Workspace Auth + Runtime › Computer use + More › RTK",
+          currentLocation: "Configuration › Plugins / Workspace + Connections › Workspace Auth / SSH hosts + Runtime › Computer use + More › RTK",
           belongsIn: "2. Tools, MCP & Permissions",
           items: [
             "Plugins (plugins — Apps tool switches + custom STDIO/HTTP MCPs + Ready-to-add catalog)",
             "Workspace MCP (instant-mcp — Folder scopes, linked projects, permission profiles, local port)",
             "Workspace Authentication (workspace-auth — OAuth/Bearer/API keys for local MCP listeners)",
+            "SSH hosts (ssh-connections — Hosts agents may reach over SSH, confirmed host keys, Production flag)",
             "Computer use (computer-use — Desktop control, step review, Always-allowed apps)",
             "RTK (rtk — Shell command output compactor & savings report)",
           ],

@@ -5,6 +5,7 @@
   "commit": "171c355e76a873b19c70161b156822234bf3be30",
   "source": "src/orchestrator-handler.cjs",
   "target": "electron/orchestrator-handler.cjs",
-  "sha256": "f9458065804cf69078101b532a147669ac9d1ca6db25f371f4ca0dd9c5094e2f",
-  "compatibility": "legacy-adapter-forwarding; native-engine-not-certified"
+  "sha256": "ebe688a693f952c488f7f9f57a722bc7600e52f698002c1836b47b2f40639b15",
+  "compatibility": "legacy-adapter-forwarding; native-engine-not-certified",
+  "localChanges": "HARNESS_METHODS adds openSshTerminal (the in-app SSH terminal, 2026-11-27); not yet in the upstream source at the commit above"
 }
