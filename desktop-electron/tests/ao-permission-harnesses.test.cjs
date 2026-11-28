@@ -59,10 +59,12 @@ test("a launch the app refused is a route refusal; a failure a later try can get
     // A card saved before 0.8.137 says it in agy's old words.
     "Launch failed: Antigravity asks for approval in its own terminal, which the chat does not show, and its auto mode is not available through the CPA gateway, so it would wait for good. Choose Full access.",
     "Launch failed: Single assistant: pi can't use the CPA model cpa/opencode-go/glm-5.3-flash. Choose one of its own models.",
-    "Launch failed: Choose a supported CPA reasoning level"]) assert.match(refusal, ROUTE_REFUSED, refusal);
+    "Launch failed: Choose a supported CPA reasoning level",
+    // 0.8.175: Antigravity's CPA models run only in the agy chat (antigravityRefusal).
+    "Launch failed: Planner: gemini-4-argon-high can't run on this harness. Antigravity models run only in the agy chat (the Antigravity harness, on its own Google sign-in): Google refuses them from other agent harnesses (it reports \"quota exhausted\") and can suspend the accounts. Choose another model."]) assert.match(refusal, ROUTE_REFUSED, refusal);
   // A refusal reworded in aoLaunchArgs must be reworded here too: each throw there is one of these.
   const launch = engine.slice(engine.indexOf("function aoLaunchArgs"), engine.indexOf("function aoLaunchArgs") + 6000);
-  assert.equal((launch.match(/throw new Error\(/g) ?? []).length, 4, "a new launch refusal is added to ROUTE_REFUSED and this list");
+  assert.equal((launch.match(/throw new Error\(/g) ?? []).length, 5, "a new launch refusal is added to ROUTE_REFUSED and this list");
   for (const transient of [
     "Launch failed: timed out waiting for the agent to start",
     "proxyconnect tcp: dial tcp 127.0.0.1:17891: connectex: No connection could be made",

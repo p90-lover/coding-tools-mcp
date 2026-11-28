@@ -212,8 +212,11 @@ test("the team page keeps saving after a reload or a save elsewhere, shows no ru
   assert.match(source, /<AgentOrchestratorCanvas [^>]*showState=\{false\}/);
   const canvas = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorCanvas.tsx"), "utf8");
   assert.match(canvas, /\{showState \? <span className="ao-canvas-state">/);
-  // The model catalog keeps its capabilities, so effort and context window are offered.
-  assert.match(source, /result\.capabilities \? \{ models: names, capabilities: result\.capabilities/);
+  // The model catalog keeps its capabilities (and notes), so effort and context window are offered:
+  // the page reads it through the role editor's shared catalogFromResult, which keeps them.
+  assert.match(source, /moduleCall\("models", \{ workspaceId, harness \}\)\.then\(catalogFromResult\)/);
+  const roleEditor = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorRoleEditor.tsx"), "utf8");
+  assert.match(roleEditor, /\.\.\.\(capabilities \? \{ capabilities \} : \{\}\)/);
 });
 
 test("a saved team can be deleted from the team page; the last team stays and chats keep their copy", () => {
