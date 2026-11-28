@@ -2466,6 +2466,17 @@ function registerIpc({ logger, stateStore }) {
     if (!computerControlService) return { ok: false, error: "Computer control is not ready yet" };
     return { ok: computerControlService.forgetApp(input.app), apps: computerControlService.allowedApps() };
   });
+  // Settings > Connected apps: what each paired program may use, and Disconnect (its key stops at once).
+  const connectedApps = () => chatAgentTools?.connectedApps?.() ?? [];
+  handle("coding-tools:computer:connected-apps", (event) => {
+    assertFocusedMainWindow(event, false);
+    return { apps: connectedApps() };
+  });
+  handle("coding-tools:computer:disconnect-app", async (event, input) => {
+    await assertFocusedMainWindowSettled(event, true);
+    if (!chatAgentTools?.forgetApp) return { ok: false, error: "Coding Tools' tools are not ready yet" };
+    return { ok: chatAgentTools.forgetApp(String(input.id)), apps: connectedApps() };
+  });
   // Computer use (the sidebar tab): whether control is on and of which window, the steps taken, the
   // always-allowed apps and the requests waiting. Read while the tab is on screen.
   handle("coding-tools:computer:overview", async (event) => {

@@ -55,6 +55,18 @@ export interface ComputerAllowedApp {
   readonly at: number;
 }
 
+/** A program paired through Connect an app (SHA, Shadow SHA): its own key for one project folder. */
+export interface ConnectedApp {
+  readonly id: string;
+  readonly name: string;
+  readonly program: string;
+  readonly workspaceId: string;
+  readonly folder: string;
+  readonly groups: readonly string[];
+  readonly createdAt: number;
+  readonly usedAt: number;
+}
+
 /** One step a chat agent took (computer-control.cjs history), newest first. */
 export interface ComputerStep {
   readonly time: string;
@@ -185,6 +197,9 @@ export interface CodingToolsApi {
     answer(input: { id: string; decision: "always" | "conversation" | "deny" }): Promise<{ ok: boolean; error?: string }>;
     allowedApps(): Promise<{ apps: ComputerAllowedApp[] }>;
     forgetApp(input: { app: string }): Promise<{ ok: boolean; apps?: ComputerAllowedApp[]; error?: string }>;
+    /** Settings > Connected apps. */
+    connectedApps(): Promise<{ apps: ConnectedApp[] }>;
+    disconnectApp(input: { id: string }): Promise<{ ok: boolean; apps?: ConnectedApp[]; error?: string }>;
     onRequests(listener: (requests: ComputerRequest[]) => void): () => void;
     /** Computer use (the sidebar tab). */
     overview(): Promise<ComputerOverview>;

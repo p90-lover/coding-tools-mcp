@@ -76,7 +76,7 @@ function createAppPairing({ dialog, getWindow, listProjects, processInfo, netsta
         detail: `Program: ${oneLine(program, 300)}\n\n`
           + "It gets its own key for the project you choose: files and commands in that folder (commands ask you, as in chats) "
           + "and computer use (each app it wants to use asks you first). It never sees your chats. "
-          + "Disconnect it any time in Settings.\n\nChoose the project, or Don't allow.",
+          + "Disconnect it any time in Settings > Computer use > Connected apps.\n\nChoose the project, or Don't allow.",
         buttons: [...labels, "Don't allow"],
         defaultId: labels.length,
         cancelId: labels.length,
