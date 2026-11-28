@@ -189,6 +189,17 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   editAppLayout: (input) => ipcRenderer.invoke("launcher:app-layout-edit", input),
   resetAppLayout: () => ipcRenderer.invoke("launcher:app-layout-reset"),
   onAppLayoutChanged: (listener) => subscription("launcher:app-layout-changed", listener),
+  // The window's own localStorage settings, copied to userData (ui-settings-mirror.cjs). The load is
+  // synchronous so a reset store is refilled before any screen reads it; the page asks for it only
+  // when its store came back empty. A host without sendSync answers "unavailable".
+  loadUiSettingsMirror: () => {
+    try {
+      return ipcRenderer.sendSync("launcher:ui-settings-load") ?? { ok: false, reason: "unavailable" };
+    } catch {
+      return { ok: false, reason: "unavailable" };
+    }
+  },
+  saveUiSettingsMirror: (entries) => ipcRenderer.send("launcher:ui-settings-save", entries),
   setSidebarState: (state) => ipcRenderer.invoke("launcher:sidebar-state", state),
   externalServicesSnapshot: () => ipcRenderer.invoke("launcher:external-services-snapshot"),
   managedComponentsSnapshot: () => ipcRenderer.invoke("launcher:managed-components-snapshot"),

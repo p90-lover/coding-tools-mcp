@@ -392,6 +392,14 @@ function appLayoutStore(logger = null) {
   });
   return appLayoutService;
 }
+// The window's own localStorage settings, copied to userData (ui-settings-mirror.cjs) so a reset
+// store gets them back (Bitdefender quarantined Local Storage\leveldb on 2026-11-27).
+let uiSettingsMirrorStore = null;
+function uiSettingsMirror(logger = null) {
+  const { MIRROR_FILE, createUiSettingsMirror } = require("./ui-settings-mirror.cjs");
+  uiSettingsMirrorStore ??= createUiSettingsMirror({ filePath: path.join(app.getPath("userData"), MIRROR_FILE), logger });
+  return uiSettingsMirrorStore;
+}
 // The person's unified-agent-tools (vendor/unified-agent-tools), for every chat that runs a GPT model.
 let gptFileTools = null;
 function unifiedAgentTools(logger = null) {
@@ -2228,6 +2236,21 @@ function installWindowControlIpc() {
   });
 }
 
+// Before the renderer loads: the page asks for its settings copy with sendSync, and a sendSync no
+// handler answers would leave the window frozen. Only the main window's own top frame is served.
+function installUiSettingsMirrorChannels(logger) {
+  const { LOAD_CHANNEL, installUiSettingsMirrorIpc } = require("./ui-settings-mirror.cjs");
+  if (registeredIpcChannels.has(LOAD_CHANNEL)) return;
+  const channels = installUiSettingsMirrorIpc({
+    ipcMain,
+    logger,
+    mirror: () => uiSettingsMirror(logger),
+    isAppFrame: (event) => Boolean(mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents
+      && event.sender.mainFrame && event.senderFrame === event.sender.mainFrame),
+  });
+  for (const channel of channels) registeredIpcChannels.add(channel);
+}
+
 function registerMinimalPreRendererIpc({ logger, stateStore }) {
   const handle = (channel, handler) => {
     if (registeredIpcChannels.has(channel)) return;
@@ -2236,6 +2259,7 @@ function registerMinimalPreRendererIpc({ logger, stateStore }) {
   };
   handle("launcher:snapshot", async () => launcherSnapshotPayload(stateStore, logger));
   installWindowControlIpc();
+  installUiSettingsMirrorChannels(logger);
   ipcRegistrar.markMinimal();
   logger.info("launcher.ipc_minimal_registered", { reason: "pre-renderer" });
 }
