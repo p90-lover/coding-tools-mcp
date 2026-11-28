@@ -554,6 +554,8 @@ async function noTerminal() {
   throw new SshHostsError("The in-app terminal is not available right now. Try again in a moment.", "no_terminal");
 }
 
+const NO_TERMINAL_HERE = "This app can't show the in-app terminal yet. The hosts list and the agent rules work as usual.";
+
 /**
  * Why AO did not open the terminal, said for the person, by AO's error code (its SSH route's codes,
  * see agent-orchestrator-upstream.cjs openSshTerminal). AO's own message is not shown or logged.
@@ -585,7 +587,9 @@ function openRefusal(error) {
  * awaited before the store file is read: the store this one replaces must have finished writing.
  * `openTerminal({ host, port, user, identityFile, title, client: { major, minor } })` opens the
  * in-app terminal through AO and resolves { handle, generation, title }; `closeTerminal(handle)`
- * closes one it opened. Both refuse with code no_terminal unless given.
+ * closes one it opened. Both refuse with code no_terminal unless given. `canShowTerminal: false` says the
+ * host cannot show that terminal at all (it shows in AO's page, a web view, which Coding Agent's web
+ * host has no way to show yet): the list then says so and terminal_open refuses before anything runs.
  */
 function createSshConnections({
   file,
@@ -604,6 +608,7 @@ function createSshConnections({
   durable = true,
   openTerminal = noTerminal,
   closeTerminal = noTerminal,
+  canShowTerminal = true,
 } = {}) {
   if (!file || !knownHostsFile || !probeDir) throw new Error("The SSH hosts store needs its files");
   let hosts = [];
@@ -843,6 +848,8 @@ function createSshConnections({
       ok: true, client: info ? { path: info.path, version: info.version } : null, hosts: hosts.map(publicHost),
       // An empty list is not shown as if it were the person's: it says why, and that nothing is lost.
       ...(unreadable ? { notice: UNREADABLE_NOTICE } : {}),
+      // Said only when there is none, so the page offers no Open terminal it cannot show.
+      ...(canShowTerminal ? {} : { terminals: false }),
     };
   }
 
@@ -1122,6 +1129,7 @@ function createSshConnections({
     try {
       await ready;
       if (disposed) throw restarting();
+      if (!canShowTerminal) throw new SshHostsError(NO_TERMINAL_HERE, "no_terminal");
       if (opening || terminals.size > 0) {
         throw new SshHostsError("A terminal is already open from this page. Close it first, then open another.", "already_open");
       }
