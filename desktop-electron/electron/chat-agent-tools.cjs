@@ -2829,7 +2829,7 @@ function createChatAgentTools({
     // call that waited minutes for its review never showed on the pill.
     // A step the person's yes for its app covers (computerStepAllowed) waits for no review.
     const reviewed = group === "desktop" && !UNREVIEWED_DESKTOP.has(name)
-      && !computerStepAllowed({ workspaceId: entry.workspaceId, session: entry.aoSession, tool: name, args });
+      && !computerStepAllowed({ workspaceId: entry.workspaceId, session: approvalSession(entry), tool: name, args });
     // A screen call whose agent hung up is abandoned: its review or permission card is withdrawn,
     // never left open to start control (or act) after the agent was told the call failed.
     const waits = group === "desktop" && channel.signal ? AbortSignal.any([signal, channel.signal]) : signal;
@@ -2868,7 +2868,7 @@ function createChatAgentTools({
     // (computerStepAllowed); as in Codex's Computer Use, control is then of an app the person
     // allowed this chat to use (computerUse).
     if (group === "desktop" && !UNREVIEWED_DESKTOP.has(name)
-      && !computerStepAllowed({ workspaceId: entry.workspaceId, session: entry.aoSession, tool: name, args })) {
+      && !computerStepAllowed({ workspaceId: entry.workspaceId, session: approvalSession(entry), tool: name, args })) {
       progress?.(`Waiting for ${name} to be reviewed; the person may be asked in the chat.`);
       const verdict = await reviewDesktop(entry, name, args, signal);
       if (verdict !== true) return verdict;
