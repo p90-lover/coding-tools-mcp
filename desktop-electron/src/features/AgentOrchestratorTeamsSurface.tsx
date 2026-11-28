@@ -3,7 +3,7 @@ import type { JsonObject, WorkspaceSummary } from "../api/contracts";
 import { AgentOrchestratorCanvas, LOOP_LINK, linkPointKey } from "./AgentOrchestratorCanvas";
 import { aoDependencyChange, aoLevels, aoUnlinkChange, listAllWorkspaces, moduleCall, watchHarnesses, type AoMission, type AoNode } from "./AgentOrchestratorSurface";
 import { AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, NATIVE_HARNESS, cardMeta,
-  defaultTeam, starterSettings, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoTeam } from "./AgentOrchestratorRoleEditor";
+  defaultTeam, starterSettings, workerRoute, type AoHarness, catalogFromResult, type AoModelLoader, type AoTeam } from "./AgentOrchestratorRoleEditor";
 import { ROLE_TITLE, prepareTeamGraph } from "./AgentOrchestratorTeam";
 import { ModelScoresPanel } from "./ModelScoresPanel";
 import "./agent-orchestrator.css";
@@ -105,12 +105,10 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
     const cached = modelCache.current.get(key);
     let models = cached && Date.now() - cached.at < 60_000 ? cached.models : undefined;
     if (!models) {
-      // Keep the catalog's capabilities, as the chat does: without them the role editor shows
-      // "Capabilities unverified" and offers no effort or context window.
-      models = moduleCall("models", { workspaceId, harness }).then(result => {
-        const names = Array.isArray(result.models) ? result.models as string[] : [];
-        return result.capabilities ? { models: names, capabilities: result.capabilities as AoModelCatalog["capabilities"] } : names;
-      });
+      // Keep the catalog's capabilities and notes, as the chat does: without them the role editor
+      // shows "Capabilities unverified", offers no effort or context window, and can't say why a
+      // saved model is not offered.
+      models = moduleCall("models", { workspaceId, harness }).then(catalogFromResult);
       const entry = { at: Date.now(), models: models };
       models.catch(() => { if (modelCache.current.get(key) === entry) modelCache.current.delete(key); });
       modelCache.current.set(key, entry);

@@ -61,6 +61,22 @@ test("AO model capabilities enable only advertised effort and a real context con
   assert.ok(!effort || effort.props.disabled, "previous harness capabilities never authorize the new harness while it loads");
 });
 
+test("a card saved on a model its agent leaves out says why, and the list says why those models are missing", async () => {
+  const note = "Antigravity models run only in the agy chat (the Antigravity harness, on its own Google sign-in): Google refuses them from other agent harnesses (it reports \"quota exhausted\") and can suspend the accounts";
+  const p = await picker(route("ao:opencode", "cpa/gemini-3.8-flash-high"), {
+    models: ["cpa/claude-haiku-4-5"], unavailable: { "cpa/gemini-3.8-flash-high": note }, withheld: note,
+  });
+  const textOf = value => typeof value === "string" ? value : Array.isArray(value) ? value.map(textOf).join("") : value?.props ? textOf(value.props.children) : "";
+  const hints = walk(p.tree).filter(item => item.props?.className === "ao-hint").map(textOf);
+  assert.ok(hints.includes(`Not on this agent: ${note}.`), `the saved model says why it is not offered: ${hints}`);
+  named(p.selectRoute(route("ao:opencode", "cpa/gemini-3.8-flash-high")), "Model").props.onClick();
+  const notes = walk(p.selectRoute(route("ao:opencode", "cpa/gemini-3.8-flash-high"))).filter(item => item.props?.role === "note").map(textOf);
+  assert.deepEqual(notes, [`${note}.`], "the open list says it once");
+  // A model the agent left out for no stated reason reads as before.
+  const plainMissing = await picker(route("ao:opencode", "cpa/gone"), { models: ["cpa/claude-haiku-4-5"] });
+  assert.ok(walk(plainMissing.tree).some(item => item.props?.className === "ao-hint" && textOf(item) === "Not on this agent."));
+});
+
 test("every AO harness uses capabilities, including compaction semantics and unsupported models", async () => {
   for (const harness of ["ao:claude-code", "ao:opencode", "ao:gemini"]) {
     const p = await picker(route(harness, "own"), { models: ["own"], capabilities: { own: { efforts: ["high"], contextWindow: { min: 4096, kind: "compaction" } } } });

@@ -14,7 +14,8 @@ const OTHER = "01a1905c-0000-4000-8000-000000000002";
 function codexHome(t) {
   const root = path.join(__dirname, "..", "..", "aiTemp", "codex-thread-stats-tests", crypto.randomUUID());
   fs.mkdirSync(root, { recursive: true });
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  // Retries: on Windows CI the worker's read can still hold a file for a moment (EPERM on rm).
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   return root;
 }
 

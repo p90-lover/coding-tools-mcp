@@ -3968,45 +3968,121 @@ test("an agent's own models take CPA's real window for the same model, and a no-
   assert.match(message, /no longer in this agent's model list/, message);
 });
 
-test("every harness, Claude Code included, is offered Antigravity's Gemini and Claude; Pi and Unreal Agent run the CPA pool", async () => {
-  // The user's rule (2026-11-08): Gemini and its provider are always allowed. They had been hidden
-  // from Claude Code since Antigravity refused its Agent SDK identity line (2026-10-22). Pi and
-  // Unreal Agent offered no CPA model at all: AO now points both at the gateway.
+test("Antigravity's models run only on agy: every other harness, Native Codex too, leaves them out and says why", async () => {
+  // The user's choice (2026-11-29, "use agy safely"): Google refuses Antigravity's models from agent
+  // harnesses and reports it as quota (58 of 58 harness requests on gemini-4-argon-high came back
+  // 429 "check quota"), and has said wrapping it in third-party agent loops can get the accounts
+  // suspended. agy runs them on its own sign-in; the app's own direct CPA calls keep them.
   const catalog = { data: [
     { id: "claude-sonnet-4-6", owned_by: "antigravity", context_window: 200000 },
     { id: "claude-opus-4-6-thinking", owned_by: "antigravity", context_window: 200000 },
     { id: "claude-haiku-4-5", owned_by: "claude", context_window: 200000 },
     { id: "gemini-3.8-flash-high", owned_by: "antigravity", context_window: 1000000 },
   ] };
+  const spawned = [];
   const workflow = createAgentOrchestratorWorkflow({
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
     fetchImpl: async url => String(url).includes("/v1/models") ? { ok: true, json: async () => catalog } : { ok: false, status: 404, json: async () => ({}) },
     requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [], teams: [], worker_capacity: {} } : { ok: true },
+    aoHarness: { catalog: async () => [], models: async () => [], spawn: async args => { spawned.push(args); return "session"; } },
+    confirm: async () => true,
+  });
+  const antigravity = ["cpa/claude-sonnet-4-6", "cpa/claude-opus-4-6-thinking", "cpa/gemini-3.8-flash-high"];
+  const why = /^Antigravity models run only in the agy chat \(the Antigravity harness, on its own Google sign-in\): Google refuses them from other agent harnesses \(it reports "quota exhausted"\) and can suspend the accounts$/;
+  for (const harness of ["ao:claude-code", "ao:codex", "ao:opencode", "ao:pi", "ao:unreal-agent"]) {
+    const listed = await workflow.call("models", { harness });
+    assert.ok(listed.models.includes("cpa/claude-haiku-4-5"), `${harness} keeps the other providers' models`);
+    for (const model of antigravity) {
+      assert.ok(!listed.models.includes(model), `${harness} is not offered ${model}`);
+      assert.match(listed.unavailable?.[model] ?? "", why, `${harness} says why ${model} is not offered`);
+    }
+    assert.match(listed.withheld ?? "", why, `${harness}'s picker gets the note once`);
+  }
+  const native = await workflow.call("models", { harness: "codex-native" });
+  assert.ok(native.models.includes("claude-haiku-4-5"), "Native Codex keeps the other providers' pool models");
+  for (const id of ["claude-sonnet-4-6", "claude-opus-4-6-thinking", "gemini-3.8-flash-high"]) {
+    assert.ok(!native.models.includes(id), `Native Codex, a harness too, is not offered ${id}`);
+    assert.match(native.unavailable?.[id] ?? "", why);
+  }
+  assert.match(native.withheld ?? "", why);
+  // agy runs them, on its own sign-in; the app's own direct CPA calls read the whole list.
+  const agy = await workflow.call("models", { harness: "ao:agy" });
+  for (const model of antigravity) assert.ok(agy.models.includes(model), `agy is offered ${model}`);
+  assert.equal(agy.withheld, undefined);
+  assert.equal(agy.unavailable?.["cpa/gemini-3.8-flash-high"], undefined);
+  const direct = await workflow.call("models", {});
+  for (const id of ["claude-sonnet-4-6", "claude-opus-4-6-thinking", "claude-haiku-4-5", "gemini-3.8-flash-high"]) {
+    assert.ok(direct.models.includes(id), `the direct CPA list (reviewer, goal checks, chat names) keeps ${id}`);
+  }
+  assert.equal(direct.capabilities["gemini-3.8-flash-high"].provider, "antigravity");
+  // A saved subagent on one fails at launch with the reason, before any AO session starts.
+  const route = (harness, model) => ({ harness_id: harness, provider_id: "agent-orchestrator", account_id: "ao-local", model });
+  assert.match(await workflow.subagentRouteRefusal(route("ao:claude-code", "cpa/gemini-3.8-flash-high")),
+    /^gemini-3\.8-flash-high is served by Antigravity\. Antigravity models run only in the agy chat .*suspend the accounts$/);
+  assert.match(await workflow.subagentRouteRefusal(route("ao:opencode", "cpa/claude-sonnet-4-6(high)")), /^claude-sonnet-4-6 is served by Antigravity\./,
+    "a saved effort suffix is the same model");
+  assert.equal(await workflow.subagentRouteRefusal(route("ao:claude-code", "cpa/claude-haiku-4-5")), null);
+  assert.equal(await workflow.subagentRouteRefusal(route("ao:agy", "cpa/gemini-3.8-flash-high")), null, "agy runs them");
+  assert.equal(await workflow.subagentRouteRefusal(route("ao:claude-code", "cpa/not-listed")), null, "a model CPA names no provider for is left to the launch");
+  // The launch refuses too (every chat card, team card and subagent passes it), and is never retried.
+  for (const harness of ["ao:claude-code", "ao:codex", "ao:opencode", "ao:pi", "ao:unreal-agent"]) {
+    assert.throws(() => workflow.subagentLaunchArgs("ws", route(harness, "cpa/gemini-3.8-flash-high"), "Explorer"),
+      error => ROUTE_REFUSED.test(error.message) && /^Explorer: gemini-3\.8-flash-high can't run on this harness\. Antigravity models run only in the agy chat/.test(error.message),
+      `${harness} is refused at launch`);
+  }
+  assert.deepEqual(workflow.subagentLaunchArgs("ws", route("ao:agy", "cpa/gemini-3.8-flash-high"), "agy worker").gateway,
+    { provider: "cpa", model: "gemini-3.8-flash-high" }, "agy still launches on it");
+  assert.deepEqual(spawned, [], "nothing was started");
+  // Pi and Unreal Agent list the pool beside their own models, and launch through the gateway.
+  const pi = await workflow.call("models", { harness: "ao:pi" });
+  assert.ok(pi.capabilities["cpa/claude-haiku-4-5"].contextWindow, "Pi takes a window on a CPA model (AO's extension declares it)");
+  const unreal = await workflow.call("models", { harness: "ao:unreal-agent" });
+  assert.equal(unreal.capabilities["cpa/claude-haiku-4-5"].contextWindow, undefined, "Unreal Agent has no window setter");
+  const piLaunch = workflow.subagentLaunchArgs("ws", route("ao:pi", "cpa/claude-haiku-4-5"), "Pi worker");
+  assert.equal(piLaunch.model, "coding-tools-cpa/claude-haiku-4-5", "Pi runs the provider AO's Pi extension registers");
+  assert.deepEqual(piLaunch.gateway, { provider: "cpa", model: "claude-haiku-4-5" });
+  const unrealLaunch = workflow.subagentLaunchArgs("ws", route("ao:unreal-agent", "cpa/claude-haiku-4-5"), "Unreal worker");
+  assert.equal(unrealLaunch.model, "claude-haiku-4-5");
+  assert.deepEqual(unrealLaunch.gateway, { provider: "cpa", model: "claude-haiku-4-5" });
+});
+
+test("a chat or team role on an Antigravity model is refused with the reason before anything is created; agy's is not", async () => {
+  const catalog = { data: [{ id: "gemini-3.8-flash-high", owned_by: "antigravity", context_window: 1000000 }, { id: "claude-haiku-4-5", owned_by: "claude" }] };
+  const web = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":read-only" };
+  const team = { id: "team", revision: 3, name: "Team", nodes: [
+    { id: "lead", role: "planner", route: web, settings: { name: "Lead" } },
+    { id: "worker", role: "worker", parents: ["lead"], route: { harness_id: "ao:opencode", provider_id: "agent-orchestrator", account_id: "ao-local",
+      model: "cpa/gemini-3.8-flash-high", permission_profile: ":ao-default" }, settings: { name: "Builder" } },
+  ] };
+  const writes = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async url => String(url).includes("/v1/models") ? { ok: true, json: async () => catalog } : { ok: false, status: 404, json: async () => ({}) },
+    requestHeadless: async endpoint => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [], teams: [team], team, worker_capacity: {} };
+      writes.push(endpoint);
+      return { ok: true };
+    },
     aoHarness: { catalog: async () => [], models: async () => [], spawn: async () => "session" },
     confirm: async () => true,
   });
-  const all = ["cpa/claude-sonnet-4-6", "cpa/claude-opus-4-6-thinking", "cpa/claude-haiku-4-5", "cpa/gemini-3.8-flash-high"];
-  const claudeCode = await workflow.call("models", { harness: "ao:claude-code" });
-  for (const model of all) assert.ok(claudeCode.models.includes(model), `Claude Code is offered ${model}`);
-  assert.equal(claudeCode.unavailable?.["cpa/gemini-3.8-flash-high"], undefined, "Gemini is not marked unavailable");
-  assert.equal(claudeCode.capabilities["cpa/gemini-3.8-flash-high"].provider, "antigravity");
-  assert.equal(workflow.subagentRouteRefusal, undefined, "no subagent route is refused for its provider");
-  // Pi and Unreal Agent list the pool beside their own models, and launch through the gateway.
-  for (const harness of ["ao:pi", "ao:unreal-agent"]) {
-    const listed = await workflow.call("models", { harness });
-    for (const model of all) assert.ok(listed.models.includes(model), `${harness} is offered ${model}`);
-  }
-  const pi = await workflow.call("models", { harness: "ao:pi" });
-  assert.ok(pi.capabilities["cpa/gemini-3.8-flash-high"].contextWindow, "Pi takes a window on a CPA model (AO's extension declares it)");
-  const unreal = await workflow.call("models", { harness: "ao:unreal-agent" });
-  assert.equal(unreal.capabilities["cpa/gemini-3.8-flash-high"].contextWindow, undefined, "Unreal Agent has no window setter");
-  const route = model => ({ harness_id: "ao:pi", provider_id: "agent-orchestrator", account_id: "ao-local", model });
-  const piLaunch = workflow.subagentLaunchArgs("ws", route("cpa/gemini-3.8-flash-high"), "Pi worker");
-  assert.equal(piLaunch.model, "coding-tools-cpa/gemini-3.8-flash-high", "Pi runs the provider AO's Pi extension registers");
-  assert.deepEqual(piLaunch.gateway, { provider: "cpa", model: "gemini-3.8-flash-high" });
-  const unrealLaunch = workflow.subagentLaunchArgs("ws", { ...route("cpa/claude-haiku-4-5"), harness_id: "ao:unreal-agent" }, "Unreal worker");
-  assert.equal(unrealLaunch.model, "claude-haiku-4-5");
-  assert.deepEqual(unrealLaunch.gateway, { provider: "cpa", model: "claude-haiku-4-5" });
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gemini-3.8-flash-high(high)",
+    permission_profile: ":ao-default" };
+  const single = await workflow.call("chat_send", { workspaceId: "ws", message: "hi", executionMode: "single", singleRoute: route });
+  assert.equal(single.ok, false);
+  assert.match(single.reason, /^gemini-3\.8-flash-high can't run on this harness\. Antigravity models run only in the agy chat \(the Antigravity harness, on its own Google sign-in\): Google refuses them from other agent harnesses \(it reports "quota exhausted"\) and can suspend the accounts\. Choose another model, or move this chat to Antigravity, then send again\.$/);
+  const native = await workflow.call("chat_send", { workspaceId: "ws", message: "hi", executionMode: "single",
+    singleRoute: { harness_id: "codex-native", provider_id: "cliproxyapi-antigravity", account_id: "shared-cpa-pool", model: "gemini-3.8-flash-high", permission_profile: ":workspace" } });
+  assert.equal(native.ok, false, "Native Codex's agent loop is refused too");
+  assert.match(native.reason, /^gemini-3\.8-flash-high can't run on this harness\./);
+  const teamSend = await workflow.call("chat_send", { workspaceId: "ws", message: "hi", executionMode: "team", teamId: "team", teamRevision: 3 });
+  assert.equal(teamSend.ok, false);
+  assert.match(teamSend.reason, /^Builder: gemini-3\.8-flash-high can't run on this harness\. .* Choose another model for it in Team settings, then send again\.$/);
+  assert.deepEqual(writes, [], "nothing was created for them");
+  // agy's route on the same model goes on to create its chat.
+  await workflow.call("chat_send", { workspaceId: "ws", message: "hi", executionMode: "single",
+    singleRoute: { ...route, harness_id: "ao:agy" } }).catch(() => undefined);
+  assert.ok(writes.length > 0, "agy is not refused");
 });
 
 test("each model is filed under the provider CPA says serves it, though CPA's full catalog names none", async () => {
@@ -4033,17 +4109,21 @@ test("each model is filed under the provider CPA says serves it, though CPA's fu
     aoHarness: { catalog: async () => [], models: async () => [], spawn: async () => "session" },
     confirm: async () => true,
   });
-  const other = await workflow.call("models", { harness: "ao:opencode" });
-  const provider = id => other.capabilities[`cpa/${id}`]?.provider;
+  // agy lists every CPA model, so it shows how each is filed.
+  const agy = await workflow.call("models", { harness: "ao:agy" });
+  const provider = id => agy.capabilities[`cpa/${id}`]?.provider;
   assert.equal(provider("gemini-3.8-flash-high"), "antigravity", "Antigravity's Gemini, not Gemini's");
   assert.equal(provider("claude-sonnet-4-6"), "antigravity", "Antigravity's Claude, not Claude's");
   assert.equal(provider("claude-haiku-4-5"), "claude", "a Claude sign-in's model stays Claude's");
   assert.equal(provider("gpt-5.5"), "openai");
-  const listed = await workflow.call("models", { harness: "ao:claude-code" });
-  assert.equal(listed.capabilities["cpa/claude-haiku-4-5"]?.provider, "claude");
-  for (const id of ["claude-sonnet-4-6", "gemini-3.8-flash-high"]) {
-    assert.ok(listed.models.includes(`cpa/${id}`), `Claude Code is offered Antigravity's ${id}`);
-    assert.equal(listed.capabilities[`cpa/${id}`]?.provider, "antigravity", "filed under Antigravity there too");
+  // Filed under Antigravity, they run only in the agy chat: other harnesses leave them out and say why.
+  for (const harness of ["ao:claude-code", "ao:opencode"]) {
+    const listed = await workflow.call("models", { harness });
+    assert.equal(listed.capabilities["cpa/claude-haiku-4-5"]?.provider, "claude");
+    for (const id of ["claude-sonnet-4-6", "gemini-3.8-flash-high"]) {
+      assert.ok(!listed.models.includes(`cpa/${id}`), `${harness} is not offered Antigravity's ${id}`);
+      assert.match(listed.unavailable?.[`cpa/${id}`] ?? "", /^Antigravity models run only in the agy chat/);
+    }
   }
 });
 
