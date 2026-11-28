@@ -2037,7 +2037,7 @@ test("agents cannot list, describe or call the SSH hosts module through the apps
   assert.equal(mcp.isReadOnly("apps_call", { moduleId: "cpa", operation: "inspect" }), true);
 });
 
-test("main.cjs gives agents no other way in: the control server and the chat tools never get the store", () => {
+test("main.cjs gives agents no other way in: the control server never gets the store, and the chat tools get ssh_exec only", () => {
   const main = fs.readFileSync(path.join(electronRoot, "main.cjs"), "utf8");
   // The control server (what tools outside the window call) reads the catalog through the apps
   // tools above, with no arguments, and calls one module by a fixed id.
@@ -2047,8 +2047,10 @@ test("main.cjs gives agents no other way in: the control server and the chat too
   assert.deepEqual(hostCalls, ["input.moduleId", "\"agent-orchestrator\""], "the window's handler and the fixed-id route are the only callers of the host");
   assert.deepEqual([...main.matchAll(/appsMcp\.callTool\(([^)]*)\)/g)].map((match) => match[1].split(",")[0]), ["input.tool", "tool"]);
 
-  // The store is made once per backend start and handed to exactly two readers: the app module's
-  // service (the window) and the agent rules, which get the approved list and nothing else.
+  // The store is made once per backend start and handed to exactly three readers: the app module's
+  // service (the window), the agent rules, which get the approved list and nothing else, and the
+  // chat tools' ssh_exec (milestone 3), which gets the approved list and exec, never `call`: it
+  // cannot add a host, confirm a key or open a terminal.
   const uses = main.split(/\r?\n/).filter((line) => /sshconnections/i.test(line) && !/^\s*\/\//.test(line)).map((line) => line.trim());
   // The rest of main.cjs only closes its terminals (closeAll: the page went away, AO restarts, the
   // backend restarts, the app quits).
@@ -2060,6 +2062,9 @@ test("main.cjs gives agents no other way in: the control server and the chat too
     "window.webContents.once(\"destroyed\", () => { void sshConnectionsService?.closeAll(\"window_destroyed\"); });",
     "await step(\"ssh-terminals\", () => sshConnectionsService?.closeAll(\"quit\"), 10_000);",
     "const { createSshConnections } = backendBundles.requireModule(backend, \"ssh-connections.cjs\");",
+    "hosts: () => sshConnectionsService?.approvedHosts?.() ?? [],",
+    "run: (input) => (sshConnectionsService",
+    "? sshConnectionsService.exec(input)",
     "const sshConnections = createSshConnections({",
     "after: sshConnectionsService?.dispose(),",
     "sshConnectionsService = sshConnections;",
@@ -2085,7 +2090,11 @@ test("main.cjs gives agents no other way in: the control server and the chat too
   assert.ok(main.indexOf("agentOrchestratorUpstream = createAgentOrchestratorUpstream({") < main.indexOf("const sshConnections = createSshConnections({"));
   const chatTools = main.slice(main.indexOf("chatAgentTools = createChatAgentTools({"), main.indexOf("void chatAgentTools.listen()"));
   assert.ok(chatTools.length > 1000);
-  assert.doesNotMatch(chatTools, /sshConnections|appsHost|appsMcp/, "the chat agents' tool server is given neither the store nor the apps host");
+  assert.doesNotMatch(chatTools, /appsHost|appsMcp/, "the chat agents' tool server is never given the apps host");
+  // ssh_exec (milestone 3) reaches the current store for its approved hosts and exec, and nothing
+  // else: never the window's dispatcher (call), so no agent adds a host, confirms a key or opens a terminal.
+  assert.deepEqual([...chatTools.matchAll(/sshConnectionsService\??\.(\w+)/g)].map((match) => match[1]), ["approvedHosts", "exec"]);
+  assert.doesNotMatch(chatTools, /\.call\(operation|\bsshConnections\b/, "neither the store's dispatcher nor a backend start's own store");
 });
 
 /** One statement of main.cjs, from `start` to the end of the block it opens (its closing `});` at `indent`). */
