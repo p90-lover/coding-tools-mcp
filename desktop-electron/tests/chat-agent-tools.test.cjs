@@ -38,7 +38,7 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
   minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
   wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null, appProcesses = null, captureApp = null,
   chatTitles = null, redaction = null, computerControl = null, previews = null, chatMoves = null, reviewCall = null, sessionModel = null, previewEnabled = () => true,
-  streamAfterMs = undefined, keepAliveMs = undefined, reviewComputerSteps = null,
+  streamAfterMs = undefined, keepAliveMs = undefined, reviewComputerSteps = null, pairApp = null,
   registry = [{ id: "ws1", path: path.join(os.tmpdir(), "task") }, { id: "ws2", path: path.join(os.tmpdir(), "other") }] } = {}) {
   const calls = [];
   const asked = [];
@@ -51,7 +51,7 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
     ...(streamAfterMs !== undefined ? { streamAfterMs } : {}), ...(keepAliveMs !== undefined ? { keepAliveMs } : {}),
     ...(rewriteCommand ? { rewriteCommand } : {}), ...(chatTitles ? { chatTitles } : {}), ...(redaction ? { redaction } : {}),
     ...(computerControl ? { computerControl } : {}), ...(chatMoves ? { chatMoves } : {}), ...(reviewCall ? { reviewCall } : {}), ...(sessionModel ? { sessionModel } : {}),
-    ...(reviewComputerSteps ? { reviewComputerSteps } : {}),
+    ...(reviewComputerSteps ? { reviewComputerSteps } : {}), ...(pairApp ? { pairApp } : {}),
     confirm: async (request) => { confirmations.push(request); return confirm(request); },
     sessionWorkspace: async (id, workspaceId) => {
       asked.push(id);
@@ -3088,6 +3088,55 @@ test("as in Codex, the yes for an app covers its steps: no review per step there
   } finally { await tools.close(); tree.cleanup(); }
 });
 
+test("a connected app's yes covers its own steps, asked in Coding Tools' window, never a chat card", async () => {
+  const tree = tempTree();
+  const windows = [{ window_id: 7, pid: 70, title: "notes.txt - Notepad", app: "notepad.exe", appName: "Notepad" }];
+  let controlled = null;
+  const allowed = new Set();
+  const asked = [];
+  const computerControl = {
+    status: async () => ({ state: controlled ? "active" : "stopped", session_id: "lease-1" }),
+    targets: async () => windows,
+    controlled: () => controlled,
+    appName: (app) => windows.find((item) => item.app === app)?.appName ?? app,
+    appAllowed: (app, workspaceId, session) => allowed.has(`${workspaceId}:${session}:${app}`),
+    askApp: async (request) => {
+      asked.push(request);
+      allowed.add(`${request.workspaceId}:${request.conversation ?? request.aoSession}:${request.target.app}`);
+      return { allowed: true, decision: "conversation" };
+    },
+    start: async ({ target }) => { controlled = target; return { state: "active", session_id: "lease-1" }; },
+    activity: () => () => undefined,
+  };
+  const catalog = { ...CATALOG, tools: [...CATALOG.tools, ...["computer_list_windows", "computer_select_window", "computer_wait"].map(tool)] };
+  const pairApp = async () => ({ workspaceId: "ws1", root: tree.checkout, project: "Task", program: "H:\\Apps\\sha\\sha.exe" });
+  const { tools, calls, confirmations } = fixture({ root: tree.root, desktop: () => true, terminal: () => true, computerControl, catalog, pairApp,
+    reviewComputerSteps: () => false, reviewCall: async () => ({ action: "ask", reason: "unsure" }), confirm: async () => true });
+  try {
+    const { url } = await session(tools);
+    const pairUrl = `http://127.0.0.1:${new URL(url).port}/apps/pair`;
+    const sha = (await post(pairUrl, { app: { id: "sha", name: "SHA" } })).body;
+    const shaAuth = { authorization: `Bearer ${sha.token}` };
+    assert.equal((await callTool(sha.url, shaAuth, "computer_list_windows", {})).isError, false);
+    assert.equal((await callTool(sha.url, shaAuth, "computer_select_window", { window_id: 7, pid: 70 })).isError, false);
+    assert.equal(asked.length, 1);
+    assert.deepEqual([asked[0].agent, asked[0].viaDialog, asked[0].conversation], ["SHA", true, "app:sha"], "Coding Tools' window asks, for this app");
+    assert.equal(tools.computerStepAllowed({ workspaceId: "ws1", session: "app:sha", tool: "computer_action" }), "A step in Notepad, which you allowed this chat to use");
+    for (const name of ["computer_action", "computer_wait"]) {
+      assert.equal((await callTool(sha.url, shaAuth, name, { session_id: "lease-1" })).isError, false, name);
+      assert.equal(calls.at(-1).body.tool, name, `${name} ran`);
+    }
+    assert.equal(confirmations.length, 0, "no step in the app it was allowed waited for the person");
+
+    // Another app, with Notepad already under control: its step is the person's to allow, in Coding Tools.
+    const shadow = (await post(pairUrl, { app: { id: "shadow-sha", name: "Shadow SHA" } })).body;
+    const shadowAuth = { authorization: `Bearer ${shadow.token}` };
+    await callTool(shadow.url, shadowAuth, "computer_action", { session_id: "lease-1" });
+    assert.equal(confirmations.length, 1, "its step is confirmed, not covered by SHA's yes");
+    assert.deepEqual([asked[1].agent, asked[1].viaDialog, asked[1].conversation], ["Shadow SHA", true, "app:shadow-sha"]);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
 test("computer use asks on a card in the chat, Codex's own, and keeps Always allow across restarts", async () => {
   const { createComputerControl, barPage } = require("../electron/computer-control.cjs");
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), "computer-approvals-"));
@@ -3175,6 +3224,47 @@ test("computer use asks on a card in the chat, Codex's own, and keeps Always all
     assert.deepEqual(control.requests(), [], "a stopped chat's card goes");
   } finally { control.dispose(); fs.rmSync(folder, { recursive: true, force: true }); }
   assert.ok(!barPage({ title: "</span><script>" }).includes("</span><script>"));
+});
+
+test("a connected app's computer use is asked in Coding Tools' window, kept as that app's own, and goes when it disconnects", async () => {
+  const { createComputerControl } = require("../electron/computer-control.cjs");
+  const calls = [];
+  const request = async (endpoint, body) => {
+    calls.push([endpoint, body]);
+    if (endpoint === "/api/v1/workspaces") {
+      return { workspaces: [{ id: "ws", name: "proj", screen_capture_enabled: false, permission_mode: "p", approval_mode: "a", tool_profile: "t" }] };
+    }
+    return {};
+  };
+  const make = (promptApp) => createComputerControl({ request, BrowserWindow: class {}, ownPids: () => [1], onRequests: () => undefined, processAlive: () => true, promptApp,
+    screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1000, height: 800 } }) } });
+  const target = { window_id: 9, pid: 90, title: "a.txt", app: "notepad.exe" };
+  const ask = (control, app, agent = "SHA") => control.askApp({ workspaceId: "ws", agent, target, viaDialog: true, conversation: `app:${app}` });
+  const asked = [];
+  const answers = ["conversation", "deny"];
+  const control = make(async (question) => { asked.push(question); return answers.shift(); });
+  try {
+    assert.deepEqual(await ask(control, "sha"), { allowed: true, decision: "conversation" });
+    assert.deepEqual(control.requests(), [], "no chat card: an app has no chat to show it in");
+    assert.deepEqual(asked, [{ agent: "SHA", app: "Notepad", window: "a.txt", project: "proj", captureOff: true, signal: null }]);
+    assert.equal(calls.find(([endpoint]) => endpoint === "/api/v1/workspaces/policy")?.[1].screen_capture_enabled, true, "allowing turns capture on");
+    assert.equal(control.appAllowed("notepad.exe", "ws", "app:sha"), true);
+    assert.equal(control.appAllowed("notepad.exe", "ws", ""), false, "never a chat's");
+    assert.equal(control.appAllowed("notepad.exe", "ws", "app:shadow-sha"), false, "nor another app's");
+    assert.deepEqual(await ask(control, "sha"), { allowed: true, decision: "earlier" });
+    assert.equal(asked.length, 1, "asked once");
+    assert.deepEqual(await ask(control, "shadow-sha", "Shadow SHA"), { allowed: false, reason: "the user denied it" });
+    assert.equal(control.appAllowed("notepad.exe", "ws", "app:shadow-sha"), false);
+    assert.equal(control.forgetConversation("ws", "app:sha"), true);
+    assert.equal(control.appAllowed("notepad.exe", "ws", "app:sha"), false, "Allow until it disconnects");
+  } finally { control.dispose(); }
+  const unasked = make(null);
+  const broken = make(async () => { throw new Error("the window closed"); });
+  try {
+    assert.deepEqual(await ask(unasked, "sha"), { allowed: false, reason: "Coding Tools can't ask about this app right now" });
+    assert.deepEqual(await ask(broken, "sha"), { allowed: false, reason: "the window closed" });
+    assert.equal(broken.appAllowed("notepad.exe", "ws", "app:sha"), false);
+  } finally { unasked.dispose(); broken.dispose(); }
 });
 
 test("an app allowed before turns on screen capture in a new project; the Computer use tab's overview and Always allow", async () => {
@@ -3689,4 +3779,59 @@ test("a failing RTK rewrite never stops a command", async () => {
     assert.equal((await callTool(url, auth, "exec_command", { cmd: "git status" })).isError, false);
     assert.equal(calls.at(-1).body.arguments.cmd, "git status");
   } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("Connect an app: an app the person allowed gets its own key for one project folder and only the app tool groups", async () => {
+  const tree = tempTree();
+  const statePath = path.join(tree.base, "chat-agent-tools.json");
+  const pairings = [];
+  const pairApp = async (input) => {
+    pairings.push(input);
+    return input.id === "denied" ? null : { workspaceId: "ws1", root: tree.checkout, project: "Task", program: "H:\\Apps\\sha\\sha.exe" };
+  };
+  const first = fixture({ desktop: () => true, terminal: () => true, root: tree.root, statePath, pairApp });
+  let restored;
+  try {
+    const { url } = await session(first.tools);
+    const pairUrl = `http://127.0.0.1:${new URL(url).port}/apps/pair`;
+    assert.equal((await post(pairUrl, { app: { id: "Bad Id", name: "x" } })).status, 400);
+    assert.equal((await post(pairUrl, "not json")).status, 400);
+    assert.equal((await post(pairUrl, { app: { id: "denied", name: "Denied" } })).status, 403, "nothing without the person's yes");
+    assert.equal((await post(pairUrl, { app: { id: "sha", name: "SHA" } }, { ":method": "GET" })).status, 404);
+    const paired = await post(pairUrl, { app: { id: "sha", name: "SHA" } });
+    assert.equal(paired.status, 200);
+    assert.equal(paired.body.project, "Task");
+    assert.match(paired.body.url, /\/mcp\/ws1\/[A-Za-z0-9_-]+$/);
+    assert.ok(Number.isInteger(pairings.at(-1).peerPort) && pairings.at(-1).serverPort === Number(new URL(url).port));
+    const auth = { authorization: `Bearer ${paired.body.token}` };
+    const names = await listed(paired.body.url, auth);
+    assert.ok(names.includes("read_file") && names.includes("exec_command") && names.includes("list_commands"));
+    assert.ok(names.some((name) => name.startsWith("computer_")), "computer use is offered");
+    for (const chatOnly of ["show_in_chat", "open_plan", "preview_open", "schedule_wakeup", "rename_chat", "chat_list"]) {
+      assert.ok(!names.includes(chatOnly), `${chatOnly} belongs to a chat`);
+    }
+    assert.equal((await callTool(paired.body.url, auth, "show_in_chat", { pane: "preview" })).isError, true, "refused when called by name");
+    assert.equal((await callTool(paired.body.url, auth, "read_file", { path: "x.txt" })).isError, false);
+    const call = first.calls.findLast((item) => item.endpoint === "/api/v1/tools/call");
+    assert.equal(fs.realpathSync(call.body.root), fs.realpathSync(tree.checkout), "it works in the chosen project folder, not a chat's worktree");
+    assert.deepEqual(first.tools.connectedApps().map(({ id, name, program, workspaceId }) => ({ id, name, program, workspaceId })),
+      [{ id: "sha", name: "SHA", program: "H:\\Apps\\sha\\sha.exe", workspaceId: "ws1" }]);
+    assert.doesNotMatch(JSON.stringify(first.tools.connectedApps()), new RegExp(paired.body.token), "never the credential");
+    // A second pairing replaces the first credential.
+    const again = await post(pairUrl, { app: { id: "sha", name: "SHA" } });
+    assert.equal((await post(paired.body.url, { jsonrpc: "2.0", id: 1, method: "tools/list" }, auth)).status, 401);
+    const authAgain = { authorization: `Bearer ${again.body.token}` };
+    // Kept across a restart (hash only), then disconnected.
+    await first.tools.close();
+    const saved = JSON.parse(fs.readFileSync(statePath, "utf8")).sessions.find((item) => item.agent === "app");
+    assert.equal(saved.app.id, "sha");
+    assert.doesNotMatch(JSON.stringify(saved), new RegExp(again.body.token));
+    const forgotten = [];
+    restored = fixture({ desktop: () => true, terminal: () => true, root: tree.root, statePath, pairApp, computerControl: { forgetConversation: (...args) => forgotten.push(args) } });
+    await restored.tools.listen();
+    assert.ok((await listed(again.body.url, authAgain)).includes("read_file"));
+    assert.equal(restored.tools.forgetApp("sha"), true);
+    assert.equal((await post(again.body.url, { jsonrpc: "2.0", id: 1, method: "tools/list" }, authAgain)).status, 401, "disconnected at once");
+    assert.deepEqual(forgotten, [["ws1", "app:sha"]], "its Allow until it disconnects answers go with it");
+  } finally { await restored?.tools.close(); await first.tools.close(); tree.cleanup(); }
 });

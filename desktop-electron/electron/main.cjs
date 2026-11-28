@@ -62,7 +62,8 @@ const {
   preparePackagedRuntime,
   pruneOldRuntimes,
 } = require("./runtime-install.cjs");
-const { RuntimeSupervisor, watchdogExternalBackoff } = require("./runtime-supervisor.cjs");
+const { RuntimeSupervisor, watchdogExternalBackoff, windowsProcessInfo } = require("./runtime-supervisor.cjs");
+const { createAppPairing } = require("./app-pairing.cjs");
 const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smoke-exit.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { droppedAgentSessionEnvironment } = require("./agent-session-env.cjs");
@@ -2466,6 +2467,17 @@ function registerIpc({ logger, stateStore }) {
     await assertFocusedMainWindowSettled(event, true);
     if (!computerControlService) return { ok: false, error: "Computer control is not ready yet" };
     return { ok: computerControlService.forgetApp(input.app), apps: computerControlService.allowedApps() };
+  });
+  // Settings > Connected apps: what each paired program may use, and Disconnect (its key stops at once).
+  const connectedApps = () => chatAgentTools?.connectedApps?.() ?? [];
+  handle("coding-tools:computer:connected-apps", (event) => {
+    assertFocusedMainWindow(event, false);
+    return { apps: connectedApps() };
+  });
+  handle("coding-tools:computer:disconnect-app", async (event, input) => {
+    await assertFocusedMainWindowSettled(event, true);
+    if (!chatAgentTools?.forgetApp) return { ok: false, error: "Coding Tools' tools are not ready yet" };
+    return { ok: chatAgentTools.forgetApp(String(input.id)), apps: connectedApps() };
   });
   // Computer use (the sidebar tab): whether control is on and of which window, the steps taken, the
   // always-allowed apps and the requests waiting. Read while the tab is on screen.
@@ -5259,7 +5271,18 @@ async function start() {
       // A chat's computer control: the request card in the asking chat (no window of its own, which
       // took the focus), and the control bar whose heartbeat keeps input on.
       const { createComputerControl } = backendBundles.requireModule(backend, "computer-control.cjs");
+      // Connect an app (SHA, Shadow SHA): the person allows a program here, naming the project it may
+      // use; its computer use is asked here too, since a connected app has no chat card.
+      const appPairing = createAppPairing({
+        dialog, getWindow: () => mainWindow, logger,
+        listProjects: async () => {
+          const catalog = await headlessHost.request("/api/v1/workspaces", null, { method: "GET" });
+          return Array.isArray(catalog?.workspaces) ? catalog.workspaces : [];
+        },
+        processInfo: (pid) => windowsProcessInfo(pid),
+      });
       const computerControl = createComputerControl({
+        promptApp: (input) => appPairing.promptComputer(input),
         request: (endpoint, body, options) => headlessHost.request(endpoint, body, options),
         BrowserWindow, screen, logger,
         // The apps the person allowed (Always allow), kept across restarts.
@@ -5281,6 +5304,7 @@ async function start() {
       computerControlService = computerControl;
       app.on("will-quit", () => computerControl.dispose());
       chatAgentTools = createChatAgentTools({
+        pairApp: (input) => appPairing.pair(input),
         generateImage: backendBundles.requireModule(backend, "chat-images.cjs").createChatImageGenerator({
           connection: () => externalServicesController.cpaConnection(),
         }),
