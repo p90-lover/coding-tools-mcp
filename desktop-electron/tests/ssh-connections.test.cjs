@@ -1201,6 +1201,25 @@ test("terminal_open refuses a host that is not approved with terminalCommand's c
   assert.deepEqual(lines.slice(3, 5).map((entry) => entry[2]), [{ code: "not_found" }, { code: "not_found" }], "an id that is not in the list is not logged");
 });
 
+test("a host that cannot show the terminal: the list says so, and terminal_open refuses before the pinned file or AO", async () => {
+  // Coding Agent's web host, which has no web views yet: the hosts list and the agent rules stay.
+  const context = withAo({ canShowTerminal: false });
+  const { store, ao, logs } = context;
+  const host = await pinnedHost(context, keyBlob("no web views"));
+  const listed = await store.call("list");
+  assert.equal(listed.ok, true, listed.error);
+  assert.equal(listed.terminals, false);
+  assert.equal(listed.hosts.length, 1, "the approved host is listed as before");
+  const pinned = fs.readFileSync(context.knownHostsFile, "utf8");
+  const answer = await store.call("terminal_open", { id: host.id });
+  assert.deepEqual(answer, { ok: false, error: "This app can't show the in-app terminal yet. The hosts list and the agent rules work as usual.", code: "no_terminal" });
+  assert.deepEqual(ao.opened, [], "AO was asked nothing");
+  assert.equal(fs.readFileSync(context.knownHostsFile, "utf8"), pinned, "the pinned file was not written for it");
+  assert.deepEqual(assertTerminalLogs(logs, ["example.com", "deploy"]).map((entry) => entry[2]), [{ code: "no_terminal" }], "no host id: nothing was looked up");
+  // A host that can show it says nothing about it.
+  assert.equal("terminals" in (await withAo().store.call("list")), false);
+});
+
 test("AO's refusals are said in the module's words, and an answer that is no terminal opens nothing", async () => {
   const context = withAo();
   const { store, ao, behaviour, logs } = context;
@@ -2148,15 +2167,23 @@ test("each SSH hosts store closes its terminals through the upstream it was made
   } });
   // The block as main.cjs runs it in startBackendFrom; afterwards the module's upstream is replaced,
   // as the next backend start does.
-  const make = new Function("scope", "createSshConnections", "app", "path", "logger",
+  const make = new Function("scope", "createSshConnections", "app", "path", "logger", "runningHost",
     `let agentOrchestratorUpstream = scope.upstream; let sshConnectionsService = scope.previous;\n${block}\nscope.replace = (next) => { agentOrchestratorUpstream = next; };\nreturn sshConnections;`);
+  const userData = { getPath: () => path.join(scratch, "bound") };
   const scope = { upstream: upstream("first"), previous: null };
-  const options = make(scope, (given) => given, { getPath: () => path.join(scratch, "bound") }, path, null);
+  const options = make(scope, (given) => given, userData, path, null, { capabilities: { webViews: true } });
   scope.replace(upstream("second"));
   await options.openTerminal({ title: "Build server" });
   await options.closeTerminal("shellterm-ssh-first");
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["first", "open", "Build server"], ["first", "close", "shellterm-ssh-first", { ssh: true }]],
     "the old store's close reaches the upstream that opened the terminal, never the new one");
+
+  // The terminal shows in AO's page, a web view: offered on Electron's host and on a host that names
+  // no capabilities, not on one without web views (Coding Agent's web host).
+  assert.equal(options.canShowTerminal, true);
+  const hostOf = (runningHost) => make({ upstream: upstream("other"), previous: null }, (given) => given, userData, path, null, runningHost);
+  assert.equal(hostOf({ capabilities: { webViews: false } }).canShowTerminal, false);
+  assert.equal(hostOf({}).canShowTerminal, true);
 
   // With the real store: its dispose (the next store's `after`) closes through that same upstream.
   calls.length = 0;

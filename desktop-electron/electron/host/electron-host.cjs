@@ -148,6 +148,9 @@ function createElectronHost(electron) {
     net: pick(api.net, HOST_SERVICES.net),
     webContents: pick(api.webContents, HOST_SERVICES.webContents),
     webFrameMain: pick(api.webFrameMain, HOST_SERVICES.webFrameMain),
+    // What this host can do that another host may not yet. webViews: web pages in views over the
+    // window (AO's page, the browser panes); Coding Agent's web host says false until it can.
+    capabilities: Object.freeze({ webViews: typeof api.WebContentsView === "function" }),
   });
 }
 

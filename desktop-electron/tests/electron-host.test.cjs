@@ -107,6 +107,14 @@ test("under plain Node, where require('electron') is a path, every service is nu
   assert.equal(createElectronHost({ Notification: { isSupported: () => true } }).Notification, null, "not a class: no notifications");
 });
 
+test("capabilities: Electron shows web pages in views (AO's page, the browser panes) when it has WebContentsView", () => {
+  // main.cjs offers the SSH hosts page's terminal, which shows in AO's page, only on such a host.
+  const host = createElectronHost({ WebContentsView: class WebContentsView {} });
+  assert.deepEqual({ ...host.capabilities }, { webViews: true });
+  assert.ok(Object.isFrozen(host.capabilities));
+  assert.deepEqual({ ...createElectronHost("C:\\electron\\electron.exe").capabilities }, { webViews: false }, "plain Node: no views");
+});
+
 test("windows: the classes are Electron's own, and screen, dialog, Menu and nativeImage expose only what the backend calls", () => {
   const { electron, calls } = fakeElectron();
   const host = createElectronHost(electron);

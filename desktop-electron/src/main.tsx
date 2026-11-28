@@ -1,3 +1,6 @@
+// First, before React and every screen: a reset localStorage gets the window's settings back from
+// their userData copy, and later changes keep that copy current (ui-settings-mirror.ts).
+import "./ui-settings-mirror-start";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./App";

@@ -991,6 +991,35 @@ test("a queued message waits in Claude Code's queued bar: 1 message queued, its 
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0);
 });
 
+test("a queued message the app sent by itself leaves the queued bar on the next runs read; an unchanged read redraws nothing", async () => {
+  // Seen 2026-11-28 (Coding Agent 0.1.0-preview.8): the app sent the queued "ur LUNA XDDDD" and the agent
+  // answered it, but "1 message queued" stayed: only the person's own queue actions reached the bar,
+  // never the queues each runs read carries (AgentOrchestratorSurface's refresh now passes them on).
+  const { props } = base({ selectedTaskId: "t-sent", working: true,
+    runs: [run("r1", "t-sent", [node("w", "planner", "running", { route: { harness_id: "codex", model: "gpt-5" } })], { execution_mode: "single" })],
+    steer: async () => { throw new Error("not steerable"); } });
+  let runsRead = null;
+  const attach = props.queue.attach;
+  props.queue.attach = (sync) => { runsRead = sync; attach(sync); };
+  // Effects on: the chat listens for queue changes in one (its setQueueVersion redraw).
+  const view = mount(props, { effects: true });
+  const all = () => walk(view.render());
+  all().find((element) => element.type === "textarea").props.onChange({ target: { value: "ur LUNA XDDDD" } });
+  await all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  const bar = () => all().find((element) => element.props?.["aria-label"] === "Queued messages");
+  assert.ok(bar(), "queued while the turn runs");
+
+  // A runs read that finds the same queue changes nothing on screen (it runs every 5 s).
+  runsRead("ws", { "t-sent": props.queue.chats.get("t-sent") });
+  assert.equal(view.needsRender(), false, "an unchanged queue does not redraw the chat");
+
+  // The app sends it at the end of the turn and drops it from its queue; the next read says so.
+  props.queue.chats.delete("t-sent");
+  runsRead("ws", {});
+  assert.equal(view.needsRender(), true, "the change redraws the chat");
+  assert.equal(bar(), undefined, "the sent message is no longer shown as queued");
+});
+
 test("a steer on its way stays in the chat while a message waiting for the next turn is in the queued bar", async () => {
   const { props, calls } = base({ selectedTaskId: "t-stack", working: false,
     runs: [run("r1", "t-stack", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" } })], { execution_mode: "single" })],

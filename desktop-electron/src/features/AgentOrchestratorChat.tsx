@@ -126,13 +126,18 @@ const queueListeners = new Set<() => void>();
  * one chat a change was made in. A chat of that project left out has nothing queued.
  */
 export function syncChatQueues(workspaceId: string, queues: Record<string, QueuedChatMessage[]>, only?: string) {
+  // Runs reads call this every few seconds: only a queue that changed redraws the composers.
+  let changed = false;
   for (const [task, project] of QUEUE_PROJECTS) {
-    if (project === workspaceId && (only === undefined || only === task) && !queues[task]?.length) { CHAT_QUEUES.delete(task); QUEUE_PROJECTS.delete(task); }
+    if (project === workspaceId && (only === undefined || only === task) && !queues[task]?.length) { CHAT_QUEUES.delete(task); QUEUE_PROJECTS.delete(task); changed = true; }
   }
   for (const [task, items] of Object.entries(queues)) {
-    if ((only === undefined || only === task) && Array.isArray(items) && items.length) { CHAT_QUEUES.set(task, items); QUEUE_PROJECTS.set(task, workspaceId); }
+    if ((only === undefined || only === task) && Array.isArray(items) && items.length) {
+      if (JSON.stringify(CHAT_QUEUES.get(task)) !== JSON.stringify(items) || QUEUE_PROJECTS.get(task) !== workspaceId) changed = true;
+      CHAT_QUEUES.set(task, items); QUEUE_PROJECTS.set(task, workspaceId);
+    }
   }
-  for (const listener of queueListeners) listener();
+  if (changed) for (const listener of queueListeners) listener();
 }
 /** The app's queue for the chats of the open project (AgentOrchestratorSurface's chat_queue calls). */
 export type ChatQueueActions = {
